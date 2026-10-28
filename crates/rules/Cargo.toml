@@ -9,7 +9,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+globset = "0.4.21"
 procroute-proto = { path = "../proto" }
+regex = "1.13.1"
+thiserror = "2.0.21"
 
 [dev-dependencies]
 proptest = "1.12.0"

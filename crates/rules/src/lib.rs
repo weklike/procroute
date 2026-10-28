@@ -6,4 +6,5 @@
 //! 在调用前完成，这里只做与平台无关的规范化。
 #![forbid(unsafe_code)]
 
+pub mod matcher;
 pub mod path;
