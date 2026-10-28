@@ -8,11 +8,13 @@
 //!
 //! 模块划分：
 //!
-//! - `secret`：凭据包装，跨平台（T-051）；
+//! - [`secret`]：凭据包装，跨平台；
 //! - `path`：NT 设备路径转 DOS 路径、8.3 短名展开（T-052，仅 Windows）；
 //! - `dpapi`：机器范围 DPAPI 加解密（T-053，仅 Windows）；
 //! - `acl`：控制管道的安全描述符（T-054，仅 Windows）；
 //! - `service`：Windows 服务控制（仅 Windows）。
+
+pub mod secret;
 
 #[cfg(windows)]
 pub mod acl;
