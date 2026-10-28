@@ -118,6 +118,7 @@
 - 验收：`cargo xtask gen-types` 生成文件；`git diff --exit-code app/src/api/generated.ts` 在重复运行后无变化（幂等）。
 
 ### T-020 config：Profile 数据结构
+> 已按 docs/adr/0001 调整：`Profile` 定义在 proto，config 只重新导出并负责校验与迁移；rules 依赖 proto 而非 config。
 - 前置：T-003
 - 产出：`crates/config/Cargo.toml`、`crates/config/src/lib.rs`、`crates/config/src/model.rs`
 - 约束：C-ARCH-02（不碰 IO/平台）、C-CODE-01、C-ARCH-06

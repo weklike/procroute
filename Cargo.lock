@@ -259,6 +259,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "procroute-config"
+version = "0.1.0"
+dependencies = [
+ "procroute-proto",
+ "procroute-rules",
+ "proptest",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "procroute-proto"
 version = "0.1.0"
 dependencies = [
