@@ -18,6 +18,7 @@
 //! - `service`：服务控制分派器与状态上报（T-057，仅 Windows）；
 //! - `hash`：SHA-256，按锁文件校验第三方二进制（C-DEP-04、C-SEC-06，仅 Windows）；
 //! - `job`：关闭即终止的作业对象，sing-box 随服务退出（T-056，C-NET-06，仅 Windows）；
+//! - `privileges`：服务启动后移除用不到的令牌特权（C-SEC-06，仅 Windows）；
 //! - `random`：系统 CSPRNG，生成每次启动的控制 API 密钥（T-056，C-NET-08，仅 Windows）。
 
 pub mod secret;
@@ -36,6 +37,8 @@ pub mod hash;
 pub mod job;
 #[cfg(windows)]
 pub mod path;
+#[cfg(windows)]
+pub mod privileges;
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]
