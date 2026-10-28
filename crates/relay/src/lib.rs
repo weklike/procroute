@@ -11,6 +11,7 @@
 pub mod nat;
 pub mod socks5;
 pub mod tcp;
+pub mod udp;
 
 #[cfg(test)]
 mod testutil;

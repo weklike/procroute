@@ -30,6 +30,24 @@ pub async fn spawn_tcp_echo() -> (SocketAddr, Arc<AtomicUsize>) {
     (addr, hits)
 }
 
+/// UDP 回显服务器；回包前加上 `tag` 前缀，便于区分多个远端。
+pub async fn spawn_udp_echo(tag: &'static [u8]) -> (SocketAddr, Arc<AtomicUsize>) {
+    let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = s.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = Arc::clone(&hits);
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while let Ok((n, from)) = s.recv_from(&mut buf).await {
+            h.fetch_add(1, Ordering::SeqCst);
+            let mut out = tag.to_vec();
+            out.extend_from_slice(&buf[..n]);
+            let _ = s.send_to(&out, from).await;
+        }
+    });
+    (addr, hits)
+}
+
 #[derive(Default)]
 struct Log {
     usernames: Vec<String>,
@@ -64,6 +82,10 @@ impl FakeSocks {
 
     pub fn connect_targets(&self) -> Vec<SocketAddr> {
         self.log.lock().unwrap().connect_targets.clone()
+    }
+
+    pub fn associates(&self) -> usize {
+        self.log.lock().unwrap().associates
     }
 }
 
