@@ -6,5 +6,6 @@
 //! 本 crate 不依赖平台 crate，也不做文件或网络 IO（C-ARCH-02）；读写文件由服务负责。
 #![forbid(unsafe_code)]
 
+pub mod migrate;
 pub mod model;
 pub mod validate;
