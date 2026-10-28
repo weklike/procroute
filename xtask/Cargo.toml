@@ -9,6 +9,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow = "1"
+procroute-proto = { path = "../crates/proto" }
 
 [lints]
 workspace = true

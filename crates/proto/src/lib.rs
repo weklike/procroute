@@ -11,10 +11,12 @@ use ts_rs::TS;
 
 pub mod error;
 pub mod event;
+pub mod methods;
 pub mod node;
 pub mod profile;
 pub mod rpc;
 pub mod session;
+pub mod ts;
 
 /// IPC 协议版本。破坏性变更必须加一（C-ARCH-07）。
 pub const IPC_PROTOCOL_VERSION: u32 = 1;

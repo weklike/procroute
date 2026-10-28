@@ -32,6 +32,8 @@ jobs:
         run: cargo nextest run --workspace --no-tests=warn
       - name: deny
         run: cargo deny check
+      - name: 前端类型与 proto 一致（C-ARCH-04）
+        run: cargo xtask gen-types --check
 
   windows:
     name: 全量（Windows）
