@@ -1,0 +1,109 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * 主题变量与设计稿一致：中性灰底、近黑主按钮、青色表示「运行中」。
+ * 组件只用这些变量，不写死颜色值（AGENTS 5.2）。
+ */
+:root {
+  --radius: 0.5rem;
+  --background: #fafafa;
+  --foreground: #18181b;
+  --card: #ffffff;
+  --card-foreground: #18181b;
+  --popover: #ffffff;
+  --popover-foreground: #18181b;
+  --primary: #18181b;
+  --primary-foreground: #ffffff;
+  --secondary: #f4f4f5;
+  --secondary-foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #52525b;
+  --accent: #f4f4f5;
+  --accent-foreground: #18181b;
+  --border: #e4e4e7;
+  --input: #d4d4d8;
+  --ring: #0f766e;
+  --brand: #0f766e;
+  --brand-foreground: #ffffff;
+  --brand-muted: #f0fdfa;
+  --warning: #c2410c;
+  --warning-muted: #fff7ed;
+  --destructive: #b91c1c;
+  --destructive-muted: #fef2f2;
+  --sidebar: #f4f4f5;
+}
+
+.dark {
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #18181b;
+  --card-foreground: #fafafa;
+  --popover: #18181b;
+  --popover-foreground: #fafafa;
+  --primary: #fafafa;
+  --primary-foreground: #18181b;
+  --secondary: #27272a;
+  --secondary-foreground: #fafafa;
+  --muted: #27272a;
+  --muted-foreground: #a1a1aa;
+  --accent: #27272a;
+  --accent-foreground: #fafafa;
+  --border: #3f3f46;
+  --input: #52525b;
+  --ring: #2dd4bf;
+  --brand: #2dd4bf;
+  --brand-foreground: #042f2e;
+  --brand-muted: #042f2e;
+  --warning: #fb923c;
+  --warning-muted: #431407;
+  --destructive: #f87171;
+  --destructive-muted: #450a0a;
+  --sidebar: #18181b;
+}
+
+@theme inline {
+  --font-sans: Inter, 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', Consolas, monospace;
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-muted: var(--brand-muted);
+  --color-warning: var(--warning);
+  --color-warning-muted: var(--warning-muted);
+  --color-destructive: var(--destructive);
+  --color-destructive-muted: var(--destructive-muted);
+  --color-sidebar: var(--sidebar);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}
