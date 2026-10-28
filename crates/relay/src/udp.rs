@@ -298,12 +298,14 @@ async fn run_session(
         // 收发错误只结束本会话；之后的数据报会建立新会话
         let _ = pump(&inner, key, &mut rx, &mut assoc).await;
     }
-    inner.forget(key, id);
-    // fail-closed：会话没建起来或已结束，队列里剩下的数据报全部丢弃
+    // fail-closed：会话没建起来或已结束，队列里剩下的数据报全部丢弃。
+    // 先关闭并清空队列再从会话表移除：会话数归零时计数已经更新完毕，
+    // 期间新到的数据报因队列已关闭而按 Backpressure 丢弃，同样不会直连。
     rx.close();
     while rx.try_recv().is_ok() {
         inner.stats.dropped_upstream.fetch_add(1, Ordering::Relaxed);
     }
+    inner.forget(key, id);
 }
 
 async fn pump(
@@ -394,6 +396,17 @@ mod tests {
 
     const APP: &str = "192.168.1.5:50000";
 
+    /// 等所有会话结束；上限远大于 connect_timeout，超时说明会话没有按预期结束。
+    async fn session_ended(relay: &UdpRelay) {
+        timeout(Duration::from_secs(10), async {
+            while relay.session_count() > 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("session should end after the inbound refuses the connection");
+    }
+
     #[tokio::test]
     async fn one_local_port_to_many_remotes_uses_one_session() {
         let (a, _) = spawn_udp_echo(b"A:").await;
@@ -461,14 +474,12 @@ mod tests {
         let (relay, mut replies) = relay(dead, PASSWORD, DEFAULT_UDP_IDLE);
         let app: SocketAddr = APP.parse().unwrap();
         relay.send(dgram(app, target, b"leak?")).unwrap();
-        assert!(
-            timeout(Duration::from_millis(300), replies.recv())
-                .await
-                .is_err()
-        );
+        // 连接被拒绝要多久取决于平台：Windows 在回环上收到 RST 后还会重试 SYN，约 2 秒才失败。
+        // 等会话真正结束（建立失败）再断言，而不是猜一个固定时长。
+        session_ended(&relay).await;
+        assert!(replies.try_recv().is_err());
         assert_eq!(direct_hits.load(Ordering::SeqCst), 0);
         assert_eq!(relay.counts().dropped_upstream, 1);
-        assert_eq!(relay.session_count(), 0);
     }
 
     #[tokio::test]
@@ -479,11 +490,8 @@ mod tests {
         relay
             .send(dgram(APP.parse().unwrap(), target, b"x"))
             .unwrap();
-        assert!(
-            timeout(Duration::from_millis(300), replies.recv())
-                .await
-                .is_err()
-        );
+        session_ended(&relay).await;
+        assert!(replies.try_recv().is_err());
         assert_eq!(direct_hits.load(Ordering::SeqCst), 0);
         assert_eq!(relay.counts().dropped_upstream, 1);
     }
