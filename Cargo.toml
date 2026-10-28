@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [workspace]
 resolver = "3"
-members = ["crates/config", "crates/proto", "crates/rules", "xtask"]
+members = [
+    "crates/config",
+    "crates/intercept",
+    "crates/proto",
+    "crates/rules",
+    "xtask",
+]
 
 [workspace.package]
 version = "0.1.0"

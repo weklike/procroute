@@ -270,6 +270,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "procroute-intercept"
+version = "0.1.0"
+dependencies = [
+ "procroute-proto",
+ "thiserror",
+]
+
+[[package]]
 name = "procroute-proto"
 version = "0.1.0"
 dependencies = [
