@@ -859,7 +859,10 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "procroute-platform-win",
  "procroute-proto",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

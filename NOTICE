@@ -4,10 +4,17 @@ Licensed under GPL-3.0-or-later. See LICENSE.
 
 第三方组件（C-DEP-05：必须与实际分发的组件保持同步）
 --------------------------------------------------------
-本节在引入 WinDivert 与 sing-box 时补全，每项写明：
-  名称、版本、许可证、源码获取方式
+每项写明：名称、版本、许可证、源码获取方式。版本以 third_party/*/lock.json 为准。
 
-（暂无随包分发的第三方二进制）
+sing-box 1.14.4（作为独立子进程随安装包分发，打包见 T-110）
+  许可证：GPL-3.0-or-later，Copyright (C) 2022 by nekohasekai
+    附加条款：未经许可，衍生作品不得使用其名称或暗示与其存在关联。
+  源码：https://github.com/SagerNet/sing-box/tree/v1.14.4
+        （修订 c005f35300ce76427dc285481ec5695f5b179cd2）
+  二进制：https://github.com/SagerNet/sing-box/releases/tag/v1.14.4
+        只分发 sing-box.exe 与其 LICENSE；SHA256 见 third_party/sing-box/lock.json
+
+（WinDivert 在 T-071 锁定时补充）
 
 随源码分发的第三方源代码
 --------------------------------------------------------

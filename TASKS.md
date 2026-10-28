@@ -43,7 +43,7 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-054、T-057、T-058（部分，见下）、T-060 ~ T-062 | T-055 需先锁定 sing-box 版本；T-058 的 node.* 需先定分享链接/订阅的支持范围 |
+| M1 | T-050 ~ T-054、T-057、T-058（部分，见下）、T-060 ~ T-062 | T-055（sing-box 已锁定 1.14.4）；T-058 的 node.* |
 | M2 | T-070、T-073、T-074 | T-071（需要 Windows） |
 | M3 | T-090、T-096、T-097 | T-091（需要 Windows）；T-092、T-095 依赖 T-055 |
 
@@ -72,8 +72,9 @@
   `internal.error`，不假装成功。DPAPI（T-053）因此暂无调用方。日志暂无轮转。
 - 服务启动后禁用多余令牌特权（C-SEC-06）尚未实现，随 T-056（sing-box 守护）一起做。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
-- T-055 / T-092 / T-095（sing-box 配置生成）暂缓：需要先在 `third_party/sing-box/` 锁定版本与 SHA256（单独 PR，C-DEP-04），
-  再用该版本的 `sing-box check` 做回归；生成器必须以锁定版本的配置格式为准（AGENTS 第 9 节）。
+- sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的
+  `curl.exe` / `tar.exe` 拉取，SHA256 用 Windows CNG（`platform-win::hash`，T-056 校验 sing-box 时复用），
+  只在 Windows 上可用；CI 的 Windows job 在跑测试前执行它。生成器以锁定版本的配置格式为准（AGENTS 第 9 节）。
 
 ## 阶段 M0 — 脚手架与可跨平台内核（第 1–2 周）
 

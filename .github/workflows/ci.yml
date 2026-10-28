@@ -53,6 +53,8 @@ jobs:
           tool: cargo-nextest
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 拉取并校验锁定版本的 sing-box（C-DEP-04）
+        run: cargo xtask fetch-deps
       - name: test
         run: cargo nextest run --workspace --no-tests=warn
 
