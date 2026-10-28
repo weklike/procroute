@@ -215,7 +215,7 @@ fn current_process_token() -> io::Result<OwnedHandle> {
 }
 
 /// 读取令牌的用户 SID 并转成字符串形式。
-fn token_user_sid(token: &OwnedHandle) -> io::Result<String> {
+pub(crate) fn token_user_sid(token: &OwnedHandle) -> io::Result<String> {
     let handle = token.as_raw_handle() as HANDLE;
     let mut len = 0u32;
     // SAFETY: 第一次调用只取所需长度，缓冲区为空、长度为 0。
