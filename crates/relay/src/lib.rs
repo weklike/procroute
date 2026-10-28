@@ -9,3 +9,8 @@
 #![forbid(unsafe_code)]
 
 pub mod nat;
+pub mod socks5;
+pub mod tcp;
+
+#[cfg(test)]
+mod testutil;
