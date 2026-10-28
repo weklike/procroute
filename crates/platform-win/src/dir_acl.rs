@@ -167,17 +167,32 @@ mod tests {
         dir
     }
 
+    /// 新建目录的所有者：未提升时是当前用户；提升的管理员令牌默认所有者是 Administrators 组
+    /// （CI 的 Windows 运行器就是这种情况）。
+    fn create_owned_dir(tag: &str) -> (PathBuf, String) {
+        let dir = temp_dir(tag);
+        std::fs::create_dir_all(&dir).expect("create");
+        let owner = path_owner_sid(&dir).expect("owner");
+        let me = current_user_sid().expect("sid");
+        assert!(
+            owner == me || owner == ADMINISTRATORS_SID,
+            "unexpected owner {owner} of a directory created by {me}"
+        );
+        (dir, owner)
+    }
+
     /// 测试结束后把 DACL 改回只给自己，然后删除（所有者始终保有 WRITE_DAC）。
-    fn cleanup(dir: &Path, me: &str) {
-        secure_directory(dir, &format!("D:P(A;OICI;FA;;;{me})"), &[me]).expect("reset acl");
+    fn cleanup(dir: &Path, owner: &str) {
+        let me = current_user_sid().expect("sid");
+        secure_directory(dir, &format!("D:P(A;OICI;FA;;;{me})"), &[owner]).expect("reset acl");
         std::fs::remove_dir_all(dir).expect("remove");
     }
 
     #[test]
     fn secured_directory_admits_only_system_and_administrators() {
-        let me = current_user_sid().expect("sid");
-        let dir = temp_dir("secure");
-        secure_directory(&dir, CONFIG_DIR_SDDL, &[&me]).expect("secure");
+        // 所有者信任检查由下一个测试覆盖；这里只验证 DACL 的效果，所以信任实际的所有者。
+        let (dir, owner) = create_owned_dir("secure");
+        secure_directory(&dir, CONFIG_DIR_SDDL, &[&owner]).expect("secure");
 
         let dacl = path_dacl_sddl(&dir).expect("dacl");
         assert!(dacl.starts_with("D:PAI"), "{dacl}");
@@ -192,7 +207,7 @@ mod tests {
             let err = write.expect_err("plain users must not write");
             assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
         }
-        cleanup(&dir, &me);
+        cleanup(&dir, &owner);
     }
 
     #[test]
