@@ -364,11 +364,13 @@ name = "procroute-svc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "procroute-config",
  "procroute-platform-win",
  "procroute-proto",
  "procroute-rules",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
