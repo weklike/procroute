@@ -1,0 +1,10 @@
+ProcRoute
+Copyright (C) ProcRoute contributors
+Licensed under GPL-3.0-or-later. See LICENSE.
+
+第三方组件（C-DEP-05：必须与实际分发的组件保持同步）
+--------------------------------------------------------
+本节在引入 WinDivert 与 sing-box 时补全，每项写明：
+  名称、版本、许可证、源码获取方式
+
+（暂无随包分发的第三方二进制）
