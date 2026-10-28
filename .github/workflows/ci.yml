@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# CI：Linux 跑跨平台 crate 与审计，Windows 跑全量编译与单测。
+# 注意（C-TEST-04）：CI 宿主上禁止加载驱动、注册服务或修改网络设置；
+# 需要这些的 e2e 测试只在虚拟机里跑（cargo xtask e2e）。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  linux:
+    name: 跨平台 crate（Linux）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 rust-toolchain.toml 锁定的工具链
+        run: rustup show
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo nextest run --workspace --no-tests=warn
+      - name: deny
+        run: cargo deny check
+
+  windows:
+    name: 全量（Windows）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 rust-toolchain.toml 锁定的工具链
+        run: rustup show
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo nextest run --workspace --no-tests=warn
