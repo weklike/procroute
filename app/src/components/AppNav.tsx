@@ -29,10 +29,14 @@ export default function AppNav() {
         <Link
           key={to}
           to={to}
-          className="text-muted-foreground hover:bg-background/60 flex h-10 items-center gap-2.5 rounded-lg border border-transparent px-3 font-medium"
+          className="flex h-10 items-center gap-2.5 rounded-lg border px-3"
           activeProps={{
             className: 'bg-card text-foreground border-border font-semibold',
             'aria-current': 'page',
+          }}
+          inactiveProps={{
+            className:
+              'text-muted-foreground hover:bg-background/60 border-transparent font-medium',
           }}
         >
           <Icon aria-hidden="true" className="size-[18px]" />
