@@ -223,7 +223,7 @@ mod tests {
             TcpRelayConfig {
                 listen: "127.0.0.1:0".parse().unwrap(),
                 socks,
-                password: Password::new(password),
+                password: Password::new(password.to_owned()),
                 group_tags: Arc::from(vec!["game".to_owned(), "browser".to_owned()]),
                 connect_timeout: Duration::from_secs(2),
             },
@@ -352,7 +352,7 @@ mod tests {
             TcpRelayConfig {
                 listen: "0.0.0.0:0".parse().unwrap(),
                 socks: "127.0.0.1:1".parse().unwrap(),
-                password: Password::new("x"),
+                password: Password::new("x".to_owned()),
                 group_tags: Arc::from(Vec::<String>::new()),
                 connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             },

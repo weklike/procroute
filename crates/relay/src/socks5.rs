@@ -7,9 +7,9 @@
 //!
 //! 错误信息里不带密码（C-SEC-04）。
 
-use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use procroute_platform_win::secret::Secret;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -26,28 +26,8 @@ const ATYP_V6: u8 = 0x04;
 /// UDP 数据报头的最大长度：RSV(2) + FRAG(1) + ATYP(1) + 域名(1 + 255) + 端口(2)。
 pub const MAX_UDP_HEADER: usize = 262;
 
-/// 本地 SOCKS 入口的密码。`Debug` 只输出掩码（C-SEC-04）。
-///
-/// TODO(T-051)：`platform-win` 的 `Secret<T>` 就绪后改用它。
-#[derive(Clone, PartialEq, Eq)]
-pub struct Password(String);
-
-impl Password {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// 显式取出明文，只在写入 SOCKS 认证报文时使用。
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Password {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Password(***)")
-    }
-}
+/// 本地 SOCKS 入口的密码：每次启动随机生成（C-NET-08），`Debug` 只输出掩码（C-SEC-04）。
+pub type Password = Secret<String>;
 
 /// SOCKS 地址：IP 或域名。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,7 +298,7 @@ mod tests {
     use super::*;
 
     fn pw() -> Password {
-        Password::new("s3cret-r4ndom")
+        Password::new("s3cret-r4ndom".to_owned())
     }
 
     #[test]

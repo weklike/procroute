@@ -311,6 +311,7 @@ dependencies = [
 name = "procroute-relay"
 version = "0.1.0"
 dependencies = [
+ "procroute-platform-win",
  "procroute-proto",
  "proptest",
  "thiserror",

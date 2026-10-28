@@ -375,7 +375,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut config = UdpRelayConfig::new(
             socks,
-            Password::new(password),
+            Password::new(password.to_owned()),
             Arc::from(vec!["game".to_owned()]),
         );
         config.idle_timeout = idle;
@@ -515,7 +515,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut config = UdpRelayConfig::new(
             socks.addr,
-            Password::new(PASSWORD),
+            Password::new(PASSWORD.to_owned()),
             Arc::from(vec!["game".to_owned()]),
         );
         config.max_sessions = 1;
