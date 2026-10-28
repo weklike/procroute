@@ -5,6 +5,7 @@ members = [
     "crates/config",
     "crates/intercept",
     "crates/proto",
+    "crates/relay",
     "crates/rules",
     "xtask",
 ]

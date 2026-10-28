@@ -287,6 +287,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "procroute-relay"
+version = "0.1.0"
+dependencies = [
+ "procroute-proto",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "procroute-rules"
 version = "0.1.0"
 dependencies = [
