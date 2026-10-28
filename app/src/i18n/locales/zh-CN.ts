@@ -225,10 +225,52 @@ const zhCN = {
       invalidUrl: '请输入以 http:// 或 https:// 开头的地址',
     },
   },
+  session: {
+    current: '当前方案',
+    none: '未启动会话',
+    componentsLabel: '组件状态',
+    components: { service: '服务', driver: '驱动', kernel: '内核' },
+    states: {
+      service: { active: '运行中', inactive: '未运行', restarting: '重启中', failed: '异常' },
+      driver: {
+        active: '已加载',
+        inactive: '未加载',
+        restarting: '重新加载中',
+        failed: '加载失败',
+      },
+      kernel: { active: '运行中', inactive: '未启动', restarting: '重启中', failed: '已停止' },
+    },
+    start: '启动会话',
+    starting: '启动中…',
+    stop: '停止会话',
+    stopping: '停止中…',
+    noProfile: '先在方案页新建一个方案',
+    blocked: {
+      title: '目标进程网络已阻断',
+      reasons: {
+        kernel_crash_loop:
+          'sing-box 内核 1 分钟内异常退出 3 次，已按「阻断」策略停止转发。目标进程的新连接会失败，不会走直连。',
+        relay_unavailable:
+          '本地中继无法连上代理内核，已按「阻断」策略拒绝新连接。目标进程的新连接会失败，不会走直连。',
+        driver_failed:
+          '拦截驱动加载或运行失败，已按「阻断」策略处理。目标进程的新连接会失败，不会走直连。',
+      },
+      unknown: '服务已按「阻断」策略停止转发，目标进程的新连接会失败，不会走直连。',
+      viewLogs: '查看日志',
+      restart: '重新启动',
+    },
+  },
   settings: {
     general: '常规',
     language: '界面语言',
     theme: '外观',
+    driverTitle: '拦截驱动',
+    driverName: 'WinDivert {{version}}',
+    driverHint: '精确进程模式使用；会话结束时自动卸载',
+    unloadDriver: '卸载驱动',
+    unloadBlocked: '会话运行中无法卸载，请先停止会话。',
+    antiCheatHint:
+      '部分游戏的反作弊会检查已加载的驱动。如果游戏无法启动，可以在方案里改用 TUN 分流模式，或停止会话后卸载驱动。',
     themes: { system: '跟随系统', light: '浅色', dark: '深色' },
   },
 }

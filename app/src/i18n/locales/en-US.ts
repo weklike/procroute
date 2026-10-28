@@ -240,10 +240,63 @@ const enUS: Messages = {
       invalidUrl: 'Enter an address starting with http:// or https://',
     },
   },
+  session: {
+    current: 'Current profile',
+    none: 'No session running',
+    componentsLabel: 'Component status',
+    components: { service: 'Service', driver: 'Driver', kernel: 'Core' },
+    states: {
+      service: {
+        active: 'Running',
+        inactive: 'Not running',
+        restarting: 'Restarting',
+        failed: 'Failed',
+      },
+      driver: {
+        active: 'Loaded',
+        inactive: 'Not loaded',
+        restarting: 'Reloading',
+        failed: 'Failed to load',
+      },
+      kernel: {
+        active: 'Running',
+        inactive: 'Not started',
+        restarting: 'Restarting',
+        failed: 'Stopped',
+      },
+    },
+    start: 'Start session',
+    starting: 'Starting…',
+    stop: 'Stop session',
+    stopping: 'Stopping…',
+    noProfile: 'Create a profile on the Profiles page first',
+    blocked: {
+      title: 'Network blocked for target processes',
+      reasons: {
+        kernel_crash_loop:
+          'The sing-box core crashed 3 times within a minute, so forwarding stopped under the Block policy. New connections from target processes fail instead of going direct.',
+        relay_unavailable:
+          'The local relay cannot reach the proxy core, so new connections are refused under the Block policy. They fail instead of going direct.',
+        driver_failed:
+          'The interception driver failed to load or run, so traffic is handled under the Block policy. New connections from target processes fail instead of going direct.',
+      },
+      unknown:
+        'Forwarding stopped under the Block policy. New connections from target processes fail instead of going direct.',
+      viewLogs: 'View logs',
+      restart: 'Restart',
+    },
+  },
   settings: {
     general: 'General',
     language: 'Language',
     theme: 'Appearance',
+    driverTitle: 'Interception driver',
+    driverName: 'WinDivert {{version}}',
+    driverHint: 'Used by per-process mode; unloaded automatically when the session ends',
+    unloadDriver: 'Unload driver',
+    unloadBlocked: 'Cannot unload while a session is running. Stop the session first.',
+    antiCheatHint:
+      'Some anti-cheat software checks loaded drivers. If a game refuses to start, switch the profile to TUN mode, or stop the session and unload the driver.',
     themes: { system: 'System', light: 'Light', dark: 'Dark' },
   },
 }

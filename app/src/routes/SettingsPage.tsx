@@ -10,6 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import DriverPanel from '@/features/session/DriverPanel'
 import { SUPPORTED_LANGUAGES, type Language } from '@/i18n'
 import { useUiStore, type Theme } from '@/stores/ui'
 
@@ -65,6 +66,7 @@ export default function SettingsPage() {
           </Select>
         </div>
       </section>
+      <DriverPanel />
     </>
   )
 }
