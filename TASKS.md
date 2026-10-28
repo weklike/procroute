@@ -43,7 +43,7 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-054、T-057、T-058（部分，见下）、T-060 ~ T-062 | T-055（sing-box 已锁定 1.14.4）；T-058 的 node.* |
+| M1 | T-050 ~ T-055、T-057、T-058（部分，见下）、T-060 ~ T-062 | T-058 的 node.*；T-056（需要 Windows） |
 | M2 | T-070、T-073、T-074 | T-071（需要 Windows） |
 | M3 | T-090、T-096、T-097 | T-091（需要 Windows）；T-092、T-095 依赖 T-055 |
 
@@ -75,6 +75,18 @@
 - sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的
   `curl.exe` / `tar.exe` 拉取，SHA256 用 Windows CNG（`platform-win::hash`，T-056 校验 sing-box 时复用），
   只在 Windows 上可用；CI 的 Windows job 在跑测试前执行它。生成器以锁定版本的配置格式为准（AGENTS 第 9 节）。
+- T-055：节点模型（`core-mgr::node`，参数可序列化、凭据只在 `Credentials` 里以 `Secret` 持有）与出站渲染一起放在
+  core-mgr，T-058 的 node.* 与配置生成共用。配置生成是纯函数，跨平台可测；Windows 上另有用锁定版本执行
+  `sing-box check` 的回归（`cargo xtask fetch-deps` 之后才能跑），快照在 `crates/core-mgr/snapshots/`。
+  与锁定版本相关的取舍：
+  - sing-box 的 `process_name` / `process_path` 区分大小写，五种规则一律翻译成 `(?i)` 的 `process_path_regex`，
+    按规则引擎的优先级展开成有序路由规则，测试中与 `procroute-rules` 的判定逐条对照；
+  - TUN `stack` 固定 `gvisor`：`system` / `mixed` 会给 sing-box 添加持久的 Windows 防火墙规则且不删除（C-NET-06）；
+  - TUN `dns_mode` 显式 `disabled`：1.14 开启 `auto_route` 时默认 `hijack`，等同系统 DNS 接管（C-NET-09）；
+  - `urltest` 组的测速地址必须由用户配置，不使用 sing-box 内置的默认地址（C-SEC-08、C-SEC-09）；
+  - TUN 模式下 `include_children` 不生效（sing-box 只按发起连接的进程判定）。
+  - **待处理（C-NET-03）**：sing-box 退出时 TUN 与路由随之撤销，目标进程会回落直连；需要在 T-056 守护进程里
+    补 fail-closed（例如对目标进程临时加阻断），否则 TUN 模式不满足 `fail_policy = block`。
 
 ## 阶段 M0 — 脚手架与可跨平台内核（第 1–2 周）
 
