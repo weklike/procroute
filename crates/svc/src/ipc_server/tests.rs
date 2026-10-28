@@ -5,13 +5,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use procroute_proto::Empty;
-use procroute_proto::session::SessionStartParams;
+use procroute_proto::event::{ConnEvent, ConnPhase, LogEvent, Network};
+use procroute_proto::session::{SessionStartParams, SessionState, SessionStatus};
 use serde_json::json;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::task::JoinHandle;
 
 use super::*;
+use crate::events::EventHub;
 
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
@@ -44,13 +46,17 @@ fn unique_pipe_name() -> String {
 }
 
 fn start(client_auth: ClientAuth) -> Harness {
+    start_with(client_auth, Echo)
+}
+
+fn start_with(client_auth: ClientAuth, handler: impl Handler) -> Harness {
     let name = unique_pipe_name();
     let (shutdown, rx) = watch::channel(false);
     let config = ServerConfig {
         pipe_name: name.clone(),
         client_auth,
     };
-    let task = tokio::spawn(serve(config, Arc::new(Echo), rx));
+    let task = tokio::spawn(serve(config, Arc::new(handler), rx));
     Harness {
         name,
         shutdown,
@@ -204,10 +210,9 @@ async fn a_message_of_exactly_the_limit_is_accepted() {
 #[tokio::test]
 async fn frame_limit_counts_the_message_without_its_line_ending() {
     async fn read(input: Vec<u8>) -> Result<usize, &'static str> {
-        let mut buf = Vec::new();
-        match read_frame(&mut input.as_slice(), &mut buf).await {
-            Ok(true) => Ok(buf.len()),
-            Ok(false) => Err("eof"),
+        match FrameReader::new(input.as_slice()).next().await {
+            Ok(Some(frame)) => Ok(frame.len()),
+            Ok(None) => Err("eof"),
             Err(FrameError::TooLarge) => Err("too large"),
             Err(FrameError::Io(_)) => Err("io"),
         }
@@ -365,4 +370,142 @@ fn audit_records_carry_method_caller_and_outcome_only() {
     let ok = AuditRecord::new(method, &caller, &Ok(json!({ "password": "hunter2" })));
     assert_eq!(ok.outcome, "ok");
     assert!(!format!("{ok:?}").contains("hunter2"));
+}
+
+#[tokio::test]
+async fn frames_split_across_reads_are_reassembled() {
+    let data = b"a
+bcdefgh
+
+last"
+        .to_vec();
+    let mut frames = FrameReader::new(BufReader::with_capacity(3, data.as_slice()));
+    let mut got = Vec::new();
+    while let Some(frame) = frames.next().await.expect("frame") {
+        got.push(String::from_utf8(frame).expect("utf-8"));
+    }
+    assert_eq!(got, ["a", "bcdefgh", "", "last"]);
+}
+
+/// 带事件源的处理函数：方法一律返回 `{}`，事件由测试经 `hub` 发出。
+struct WithEvents {
+    hub: Arc<EventHub>,
+}
+
+impl Handler for WithEvents {
+    async fn handle(&self, _call: Call<'_>) -> Result<Value, IpcError> {
+        Ok(json!({}))
+    }
+
+    fn events(&self) -> Option<Subscription> {
+        Some(self.hub.subscribe())
+    }
+}
+
+fn hub_and_server() -> (Arc<EventHub>, Harness) {
+    let hub = Arc::new(EventHub::new(SessionStatus::default()));
+    let h = start_with(ClientAuth::Disabled, WithEvents { hub: hub.clone() });
+    (hub, h)
+}
+
+fn log_event(level: LogLevel, message: &str) -> StreamEvent {
+    StreamEvent::Log(LogEvent {
+        ts_ms: 1,
+        level,
+        module: "svc".into(),
+        message: message.into(),
+        fields: Default::default(),
+    })
+}
+
+#[tokio::test]
+async fn session_changes_are_pushed_after_hello() {
+    let (hub, h) = hub_and_server();
+    let mut c = Client::connect(&h.name).await;
+    c.hello().await;
+    hub.update_session(|s| s.state = SessionState::Running);
+    let n = c.recv().await.expect("a notification");
+    assert_eq!(n["method"], "session.status");
+    assert_eq!(n["params"]["state"], "running");
+    assert!(n.get("id").is_none(), "notifications carry no id: {n}");
+    // 状态没变不推送：下一条收到的是对请求的响应
+    hub.update_session(|s| s.state = SessionState::Running);
+    let resp = c.call(5, "session.status", json!({})).await;
+    assert_eq!(resp["id"], 5);
+}
+
+#[tokio::test]
+async fn stream_events_are_not_pushed_without_a_subscription() {
+    let (hub, h) = hub_and_server();
+    let mut c = Client::connect(&h.name).await;
+    c.hello().await;
+    let _ = hub
+        .stream_sender()
+        .send(log_event(LogLevel::Error, "unsubscribed"));
+    let _ = hub.stream_sender().send(StreamEvent::Conn(conn_event(1)));
+    // 这个连接从未订阅：下一条一定是响应
+    let resp = c.call(2, "session.status", json!({})).await;
+    assert_eq!(resp["id"], 2, "{resp}");
+}
+
+#[tokio::test]
+async fn log_events_respect_the_subscribed_level() {
+    let (hub, h) = hub_and_server();
+    let mut c = Client::connect(&h.name).await;
+    c.hello().await;
+    let resp = c
+        .call(2, "log.subscribe", json!({ "min_level": "warn" }))
+        .await;
+    assert_eq!(resp["result"], json!({}));
+    let _ = hub
+        .stream_sender()
+        .send(log_event(LogLevel::Info, "too low"));
+    let _ = hub
+        .stream_sender()
+        .send(log_event(LogLevel::Warn, "wanted"));
+    let n = c.recv().await.expect("a notification");
+    assert_eq!(n["method"], "log.subscribe");
+    assert_eq!(n["params"]["message"], "wanted");
+}
+
+#[tokio::test]
+async fn conn_events_reach_subscribed_connections() {
+    let (hub, h) = hub_and_server();
+    let mut c = Client::connect(&h.name).await;
+    c.hello().await;
+    let resp = c.call(2, "conn.subscribe", json!({})).await;
+    assert_eq!(resp["result"], json!({}));
+    let _ = hub.stream_sender().send(StreamEvent::Conn(conn_event(9)));
+    let n = c.recv().await.expect("a notification");
+    assert_eq!(n["method"], "conn.subscribe");
+    assert_eq!(n["params"]["conn_id"], 9);
+}
+
+fn conn_event(conn_id: u64) -> ConnEvent {
+    ConnEvent {
+        conn_id,
+        phase: ConnPhase::Opened,
+        pid: 1,
+        process: "a.exe".into(),
+        target: "example.com:443".into(),
+        network: Network::Tcp,
+        group: "g".into(),
+        outbound: "o".into(),
+        upload_bytes: 0,
+        download_bytes: 0,
+        started_at_ms: 0,
+    }
+}
+
+#[tokio::test]
+async fn subscribe_params_are_schema_checked() {
+    let (_hub, h) = hub_and_server();
+    let mut c = Client::connect(&h.name).await;
+    c.hello().await;
+    let resp = c
+        .call(2, "log.subscribe", json!({ "min_level": "loud" }))
+        .await;
+    assert_eq!(error_code(&resp), "ipc.invalid_params");
+    let resp = c.call(3, "conn.subscribe", json!({ "x": 1 })).await;
+    assert_eq!(error_code(&resp), "ipc.invalid_params");
 }

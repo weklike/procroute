@@ -186,7 +186,7 @@ fn info(n: StoredNode) -> NodeInfo {
     }
 }
 
-fn storage_error(e: NodeStoreError) -> IpcError {
+pub(super) fn storage_error(e: NodeStoreError) -> IpcError {
     tracing::error!(error = %e, "node storage failure");
     IpcError::new(ErrorCode::Internal, "node storage failure")
 }
