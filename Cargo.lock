@@ -295,6 +295,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "procroute-platform-win"
+version = "0.1.0"
+
+[[package]]
 name = "procroute-proto"
 version = "0.1.0"
 dependencies = [

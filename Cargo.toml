@@ -4,6 +4,7 @@ resolver = "3"
 members = [
     "crates/config",
     "crates/intercept",
+    "crates/platform-win",
     "crates/proto",
     "crates/relay",
     "crates/rules",
