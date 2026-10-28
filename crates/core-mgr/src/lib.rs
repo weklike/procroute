@@ -5,6 +5,7 @@
 //! 本 crate 负责：
 //!
 //! - [`node`]：节点模型，参数与凭据分开持有（C-SEC-04）；
+//! - [`link`]：分享链接与订阅内容解析（`node.import`），支持范围见模块文档；
 //! - [`config_gen`]：由方案、节点与运行参数生成 sing-box 配置（T-055，TUN 模式）；
 //! - 子进程守护与控制 API 客户端（T-056，待实现）。
 //!
@@ -12,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config_gen;
+pub mod link;
 pub mod node;
 mod outbound;
 mod process_regex;
