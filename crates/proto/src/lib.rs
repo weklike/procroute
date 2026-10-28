@@ -9,9 +9,11 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod error;
 pub mod event;
 pub mod node;
 pub mod profile;
+pub mod rpc;
 pub mod session;
 
 /// IPC 协议版本。破坏性变更必须加一（C-ARCH-07）。
