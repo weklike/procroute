@@ -34,7 +34,7 @@
 - `约束`：实现时必须满足的 `CONSTRAINTS.md` 条款。
 - `验收`：一条可运行的命令 + 期望结果。命令过不了就是没做完。
 
-**并行与依赖**：`crates/proto`、`crates/config`、`crates/rules` 三个跨平台 crate 可在 Linux/macOS 上开发，不依赖 Windows，适合先做、也适合多人/多轮并行。带 `[Windows]` 的任务需要 Windows 环境。
+**并行与依赖**：`crates/proto`、`crates/config`、`crates/rules`、`crates/relay` 以及 `intercept` 的 trait 与 mock 可在 Linux/macOS 上开发，不依赖 Windows，适合先做、也适合多人/多轮并行。带 `[Windows]` 的任务需要 Windows 环境。
 
 ---
 
@@ -43,10 +43,24 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | — | T-050（需要 Windows） |
+| M1 | T-050（Windows 模块为占位）、T-051、T-060 ~ T-062 | T-052 ~ T-054（需要 Windows）；T-055 需先锁定 sing-box 版本 |
+| M2 | T-070、T-073、T-074 | T-071（需要 Windows） |
+| M3 | T-090、T-096、T-097 | T-091（需要 Windows）；T-092、T-095 依赖 T-055 |
 
-偏离原计划的地方：`Profile` 定义在 proto，rules 依赖 proto 而非 config（docs/adr/0001）；
-前端 Tauri 事件名把 `.` 换成 `:`，例如 `conn.subscribe` → `ipc:conn:subscribe`（app/src/api/client.ts）。
+偏离原计划的地方：
+
+- `Profile` 定义在 proto，rules 依赖 proto 而非 config（docs/adr/0001）。
+- 前端 Tauri 事件名把 `.` 换成 `:`，例如 `conn.subscribe` → `ipc:conn:subscribe`（app/src/api/client.ts）。
+- `IpcError` 增加可选的 `fields`（`path` + `code` + `message`），表单据此把服务端校验问题标到对应字段；
+  `procroute-config::validate::to_ipc_error` 负责转换。属于新增可选字段，协议版本不变。
+- 浏览器里开发时（开发构建且不在 Tauri 中），`client.ts` 使用 `app/src/api/mock/` 的内存模拟服务；
+  生产构建通过 `import.meta.env.DEV` 整体剔除，不随安装包分发示例地址（C-SEC-09）。
+- ui.shadcn.com 在构建环境中不可达，`components/ui/` 的组件源码取自 shadcn-ui/ui 仓库（MIT，见 NOTICE）。
+  表单里的下拉框使用原生 `<select>` 包装（`components/NativeSelect.tsx`），便于 register 与测试。
+- T-050 的 `path`/`dpapi`/`acl`/`service` 只是 `cfg(windows)` 占位，windows-rs 依赖随 T-052 起的实现一起加入。
+- relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
+- T-055 / T-092 / T-095（sing-box 配置生成）暂缓：需要先在 `third_party/sing-box/` 锁定版本与 SHA256（单独 PR，C-DEP-04），
+  再用该版本的 `sing-box check` 做回归；生成器必须以锁定版本的配置格式为准（AGENTS 第 9 节）。
 
 ## 阶段 M0 — 脚手架与可跨平台内核（第 1–2 周）
 
