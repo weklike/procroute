@@ -32,8 +32,8 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
-    TOKEN_USER, TokenElevation, TokenUser,
+    GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_ELEVATION,
+    TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
 };
 use windows_sys::Win32::System::RemoteDesktop::{
     WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW, WTSActive, WTSEnumerateSessionsW, WTSFreeMemory,
@@ -63,7 +63,7 @@ pub fn control_pipe_sddl(user_sid: Option<&str>) -> String {
 
 /// 自相对格式的安全描述符，由 LocalAlloc 分配，Drop 时释放。
 #[derive(Debug)]
-pub struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+pub struct SecurityDescriptor(pub(crate) PSECURITY_DESCRIPTOR);
 
 // SAFETY: 描述符创建后只读，内存归本对象独占，跨线程移动或共享引用都不会产生数据竞争。
 unsafe impl Send for SecurityDescriptor {}
@@ -238,21 +238,43 @@ pub(crate) fn token_user_sid(token: &OwnedHandle) -> io::Result<String> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: 调用成功，缓冲区开头是一个已初始化且对齐的 TOKEN_USER。
-    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+    // SAFETY: 调用成功，缓冲区开头是一个已初始化且对齐的 TOKEN_USER；其中的 SID 位于 `buf` 内，
+    // 在下面的调用期间有效。
+    unsafe {
+        let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+        sid_to_string(user.User.Sid)
+    }
+}
+
+/// 把 SID 转成字符串形式，例如 `S-1-5-18`。
+///
+/// # Safety
+///
+/// `sid` 必须指向一个合法的 SID，且在调用期间有效。
+pub(crate) unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
     let mut text: *mut u16 = ptr::null_mut();
-    // SAFETY: `user.User.Sid` 指向 `buf` 内的合法 SID；`text` 由 API 用 LocalAlloc 分配。
-    if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) } == 0 {
+    // SAFETY: 由调用方保证 `sid` 合法；`text` 由 API 用 LocalAlloc 分配，交给 take_local_wide_string 释放。
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: 调用成功时 `text` 是以 NUL 结尾的 UTF-16 字符串；读到 NUL 为止。
-    let sid = unsafe {
+    // SAFETY: 调用成功时 `text` 是 LocalAlloc 分配、以 NUL 结尾的字符串。
+    Ok(unsafe { take_local_wide_string(text) })
+}
+
+/// 读取 API 用 LocalAlloc 返回的 NUL 结尾宽字符串，并释放它。
+///
+/// # Safety
+///
+/// `text` 必须是 LocalAlloc 分配、以 NUL 结尾的 UTF-16 字符串，且之后不再使用。
+pub(crate) unsafe fn take_local_wide_string(text: *mut u16) -> String {
+    // SAFETY: 由调用方保证以 NUL 结尾；只读到 NUL 为止。
+    let s = unsafe {
         let len = (0..).take_while(|&i| *text.add(i) != 0).count();
         from_wide(std::slice::from_raw_parts(text, len))
     };
-    // SAFETY: `text` 由 ConvertSidToStringSidW 分配，只释放一次。
+    // SAFETY: 由调用方保证内存来自 LocalAlloc 且只释放这一次。
     unsafe { LocalFree(text.cast()) };
-    Ok(sid)
+    s
 }
 
 #[cfg(test)]
