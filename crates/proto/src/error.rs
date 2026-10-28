@@ -28,6 +28,10 @@ pub enum ErrorCode {
     SessionAlreadyRunning,
     #[serde(rename = "session.not_running")]
     SessionNotRunning,
+    /// 当前模式无法保证 `fail_policy = block`：例如 TUN 模式下 sing-box 一退出，TUN 与路由随之撤销，
+    /// 目标进程会回落直连（C-NET-03）。用户可以改用 `allow` 或精确进程模式。
+    #[serde(rename = "session.fail_closed_unsupported")]
+    SessionFailClosedUnsupported,
     #[serde(rename = "profile.not_found")]
     ProfileNotFound,
     #[serde(rename = "profile.invalid_schema")]
@@ -61,6 +65,7 @@ impl ErrorCode {
         ErrorCode::IpcInvalidParams,
         ErrorCode::SessionAlreadyRunning,
         ErrorCode::SessionNotRunning,
+        ErrorCode::SessionFailClosedUnsupported,
         ErrorCode::ProfileNotFound,
         ErrorCode::ProfileInvalidSchema,
         ErrorCode::ProfileInUse,
@@ -84,6 +89,7 @@ impl ErrorCode {
             ErrorCode::IpcInvalidParams => "ipc.invalid_params",
             ErrorCode::SessionAlreadyRunning => "session.already_running",
             ErrorCode::SessionNotRunning => "session.not_running",
+            ErrorCode::SessionFailClosedUnsupported => "session.fail_closed_unsupported",
             ErrorCode::ProfileNotFound => "profile.not_found",
             ErrorCode::ProfileInvalidSchema => "profile.invalid_schema",
             ErrorCode::ProfileInUse => "profile.in_use",

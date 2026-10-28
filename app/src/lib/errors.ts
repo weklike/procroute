@@ -15,6 +15,7 @@ export const ERROR_CODES: Record<ErrorCode | 'ipc.transport', true> = {
   'ipc.invalid_params': true,
   'session.already_running': true,
   'session.not_running': true,
+  'session.fail_closed_unsupported': true,
   'profile.not_found': true,
   'profile.invalid_schema': true,
   'profile.in_use': true,

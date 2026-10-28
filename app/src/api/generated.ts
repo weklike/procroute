@@ -69,7 +69,7 @@ export type Empty = Record<symbol, never>;
 /**
  * 全部错误码。新增时在 [`ErrorCode::ALL`] 里同步登记，测试会检查。
  */
-export type ErrorCode = "ipc.version_mismatch" | "ipc.invalid_request" | "ipc.payload_too_large" | "ipc.unauthorized" | "ipc.unknown_method" | "ipc.invalid_params" | "session.already_running" | "session.not_running" | "profile.not_found" | "profile.invalid_schema" | "profile.in_use" | "node.not_found" | "node.import_failed" | "driver.not_loaded" | "driver.load_failed" | "driver.busy" | "kernel.unavailable" | "internal.error";
+export type ErrorCode = "ipc.version_mismatch" | "ipc.invalid_request" | "ipc.payload_too_large" | "ipc.unauthorized" | "ipc.unknown_method" | "ipc.invalid_params" | "session.already_running" | "session.not_running" | "session.fail_closed_unsupported" | "profile.not_found" | "profile.invalid_schema" | "profile.in_use" | "node.not_found" | "node.import_failed" | "driver.not_loaded" | "driver.load_failed" | "driver.busy" | "kernel.unavailable" | "internal.error";
 
 /**
  * 内核或中继不可用时，目标进程流量的处理方式。
