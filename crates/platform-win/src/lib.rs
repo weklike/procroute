@@ -15,7 +15,8 @@
 //! - `dir_acl`：配置目录的受保护 DACL 与所有者检查（T-058，C-SEC-05，仅 Windows）；
 //! - `process`：管道客户端 PID、进程映像路径与用户 SID（T-057，仅 Windows）；
 //! - `authenticode`：内嵌签名校验与签名主体（T-057，仅 Windows）；
-//! - `service`：服务控制分派器与状态上报（T-057，仅 Windows）。
+//! - `service`：服务控制分派器与状态上报（T-057，仅 Windows）；
+//! - `hash`：SHA-256，按锁文件校验第三方二进制（C-DEP-04、C-SEC-06，仅 Windows）。
 
 pub mod secret;
 
@@ -27,6 +28,8 @@ pub mod authenticode;
 pub mod dir_acl;
 #[cfg(windows)]
 pub mod dpapi;
+#[cfg(windows)]
+pub mod hash;
 #[cfg(windows)]
 pub mod path;
 #[cfg(windows)]

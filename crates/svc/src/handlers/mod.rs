@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! 各领域的 IPC 处理函数（T-058）。
 //!
-//! 已接上：`session.status` / `session.stop`、`profile.*`。
+//! 已接上：`session.status` / `session.stop`、`profile.*`、`node.import`（分享链接）/ `node.list`。
 //! 尚未接上、如实返回错误而不假装成功的：
-//! - `session.start`：需要 core-mgr（T-055，等待锁定 sing-box 版本）；
-//! - `node.*`：分享链接解析、订阅拉取与测速尚未实现；
+//! - `session.start`：配置生成已就绪（T-055），还需要 sing-box 子进程守护（T-056）；
+//! - `node.import` 的订阅拉取与 `node.test`：见 [`node`] 模块文档；
 //! - `process.list`、`conn.subscribe`、`log.subscribe`、`driver.*`：随 M2 的各模块接入。
 
 use std::sync::Mutex;
@@ -15,21 +15,25 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::ipc_server::{Call, Handler};
+use crate::node_store::NodeStore;
 use crate::store::{ProfileStore, StoreError};
 
+mod node;
 mod profile;
 mod session;
 
 /// 服务的全部状态，由 IPC 服务端共享。
 pub struct Services {
     profiles: ProfileStore,
+    nodes: NodeStore,
     session: Mutex<SessionStatus>,
 }
 
 impl Services {
-    pub fn new(profiles: ProfileStore) -> Self {
+    pub fn new(profiles: ProfileStore, nodes: NodeStore) -> Self {
         Self {
             profiles,
+            nodes,
             session: Mutex::new(session::initial_status()),
         }
     }
@@ -55,6 +59,9 @@ impl Handler for Services {
             "profile.get" => profile::get(self, params).await,
             "profile.save" => profile::save(self, params).await,
             "profile.delete" => profile::delete(self, params).await,
+            "node.import" => node::import(self, params).await,
+            "node.list" => node::list(self, params).await,
+            "node.test" => node::test(self, params),
             other => {
                 tracing::debug!(
                     method = other,

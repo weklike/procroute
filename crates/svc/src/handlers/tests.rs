@@ -17,6 +17,7 @@ use tokio::sync::watch;
 use super::*;
 use crate::client_auth::ClientAuth;
 use crate::ipc_server::{Caller, ServerConfig, serve};
+use crate::node_store::NodeStore;
 use crate::store::tests::sample;
 
 struct Fixture {
@@ -35,7 +36,7 @@ fn fixture(tag: &str) -> Fixture {
     let dir = std::env::temp_dir().join(format!("procroute-handlers-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     Fixture {
-        services: Services::new(ProfileStore::open(&dir).expect("store")),
+        services: services(&dir),
         dir,
         caller: Caller {
             pid: 1234,
@@ -43,6 +44,14 @@ fn fixture(tag: &str) -> Fixture {
             sid: "S-1-5-21-1-2-3-1001".into(),
         },
     }
+}
+
+/// 方案目录与节点文件分开放，和正式布局一致（`profiles\` 与 `nodes.json`）。
+fn services(dir: &std::path::Path) -> Services {
+    Services::new(
+        ProfileStore::open(dir).expect("store"),
+        NodeStore::open(dir.join("node-store").join("nodes.json")).expect("node store"),
+    )
 }
 
 impl Fixture {
@@ -203,9 +212,101 @@ async fn params_are_schema_checked() {
 #[tokio::test]
 async fn unwired_methods_fail_explicitly() {
     let f = fixture("unwired");
-    for m in ["node.list", "node.import", "process.list", "driver.status"] {
+    for m in ["process.list", "driver.status"] {
         assert_eq!(code(f.call(m, json!({})).await), ErrorCode::Internal, "{m}");
     }
+    assert_eq!(
+        code(f.call("node.test", json!({ "ids": [] })).await),
+        ErrorCode::KernelUnavailable
+    );
+    assert_eq!(
+        code(
+            f.call(
+                "node.import",
+                json!({ "kind": "subscription", "name": "s", "url": "https://sub.example.com/s" })
+            )
+            .await
+        ),
+        ErrorCode::NodeImportFailed
+    );
+}
+
+const TROJAN: &str = "trojan://hunter2-node-secret@tj.example.com:443?sni=tj.example.com#香港 01";
+
+#[tokio::test]
+async fn node_import_and_list_round_trip() {
+    let f = fixture("nodes");
+    let text = format!("{TROJAN}\nssr://abc\n\nhy2://pw@[2001:db8::1]:443#v6");
+    let r = f
+        .call(
+            "node.import",
+            json!({ "kind": "share_links", "text": text }),
+        )
+        .await
+        .expect("import");
+    assert_eq!(
+        r,
+        json!({ "added": 2, "skipped": 1, "issues": [ { "line": 2, "reason": "unsupported_protocol" } ] })
+    );
+
+    let list = f.call("node.list", json!({})).await.expect("list");
+    let nodes = list["nodes"].as_array().expect("nodes");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["name"], "香港 01");
+    assert_eq!(nodes[0]["protocol"], "trojan");
+    assert_eq!(nodes[0]["server"], "tj.example.com:443");
+    assert_eq!(nodes[0]["credential"], "set");
+    assert_eq!(nodes[1]["protocol"], "hysteria2");
+    assert_eq!(nodes[1]["server"], "[2001:db8::1]:443");
+    let outbounds = list["outbounds"].as_array().expect("outbounds");
+    assert_eq!(outbounds[0]["tag"], nodes[0]["id"]);
+    assert_eq!(outbounds[0]["kind"], "single");
+    assert_eq!(outbounds[0]["members"], json!([nodes[0]["id"]]));
+    assert_eq!(list["subscriptions"], json!([]));
+    // C-SEC-04：凭据既不在响应里，也不以明文落盘
+    assert!(!list.to_string().contains("hunter2"), "{list}");
+    let on_disk =
+        std::fs::read_to_string(f.dir.join("node-store").join("nodes.json")).expect("read");
+    assert!(!on_disk.contains("hunter2"));
+    assert!(on_disk.contains("tj.example.com"));
+
+    // 再次导入同一条链接：按重复跳过，不产生新节点
+    let again = f
+        .call(
+            "node.import",
+            json!({ "kind": "share_links", "text": TROJAN }),
+        )
+        .await
+        .expect("import");
+    assert_eq!(
+        again,
+        json!({ "added": 0, "skipped": 1, "issues": [ { "line": 1, "reason": "duplicate" } ] })
+    );
+    let list = f.call("node.list", json!({})).await.expect("list");
+    assert_eq!(list["nodes"].as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn node_import_reports_whole_input_problems() {
+    let f = fixture("nodes-bad");
+    let r = f
+        .call(
+            "node.import",
+            json!({ "kind": "share_links", "text": "proxies:\n  - name: a" }),
+        )
+        .await
+        .expect("import");
+    assert_eq!(
+        r,
+        json!({ "added": 0, "skipped": 0, "issues": [ { "line": 0, "reason": "clash_yaml_unsupported" } ] })
+    );
+    assert_eq!(
+        code(
+            f.call("node.import", json!({ "kind": "share_links" }))
+                .await
+        ),
+        ErrorCode::IpcInvalidParams
+    );
 }
 
 /// 把 tracing 输出收集到内存里。
@@ -243,7 +344,7 @@ async fn mutating_calls_are_audited_without_their_params() {
     let f = fixture("audit");
     let name = format!(r"\\.\pipe\ProcRoute.Test.audit.{}", std::process::id());
     let (tx, rx) = watch::channel(false);
-    let services = Services::new(ProfileStore::open(&f.dir).expect("store"));
+    let services = services(&f.dir);
     let config = ServerConfig {
         pipe_name: name.clone(),
         client_auth: ClientAuth::Disabled,
@@ -266,6 +367,8 @@ async fn mutating_calls_are_audited_without_their_params() {
                 "params": { "protocol_version": IPC_PROTOCOL_VERSION, "client_version": marker } }),
         json!({ "jsonrpc": "2.0", "id": 2, "method": "profile.save", "params": p }),
         json!({ "jsonrpc": "2.0", "id": 3, "method": "profile.delete", "params": { "id": "missing" } }),
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "node.import",
+                "params": { "kind": "share_links", "text": format!("trojan://{marker}@h.example.com:443#{marker}") } }),
     ];
     for req in requests {
         let mut line = serde_json::to_vec(&req).expect("encode");
@@ -280,12 +383,16 @@ async fn mutating_calls_are_audited_without_their_params() {
 
     let logs = capture.text();
     let audit: Vec<_> = logs.lines().filter(|l| l.contains(" audit: ")).collect();
-    assert_eq!(audit.len(), 2, "one record per mutating call:\n{logs}");
+    assert_eq!(audit.len(), 3, "one record per mutating call:\n{logs}");
     assert!(
         audit[0].contains("method=\"profile.save\"") && audit[0].contains("outcome=\"ok\""),
         "{logs}"
     );
     assert!(audit[1].contains("outcome=\"profile.not_found\""), "{logs}");
+    assert!(
+        audit[2].contains("method=\"node.import\"") && audit[2].contains("outcome=\"ok\""),
+        "{logs}"
+    );
     assert!(
         audit.iter().all(|l| l.contains("caller_sid=S-1-5-")),
         "{logs}"

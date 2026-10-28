@@ -36,7 +36,7 @@ crates/
   procwatch/     进程追踪：ETW 事件 + Toolhelp 快照，维护进程树          [Windows]
   intercept/     Interceptor trait 与后端：divert/、tun/（预留 ndis/）  [Windows；trait、判定逻辑与 mock 跨平台]
   relay/         NAT 表、本地 TCP/UDP 中继、SOCKS5 客户端               [跨平台]
-  core-mgr/      sing-box 配置生成、子进程守护、控制 API 客户端          [Windows]
+  core-mgr/      节点模型与分享链接解析、sing-box 配置生成、子进程守护、控制 API 客户端  [Windows；守护以外跨平台]
   platform-win/  Windows API 封装：路径规范化、DPAPI、ACL、服务控制      [Windows；Secret<T> 跨平台]
   svc/           二进制：Windows 服务入口，唯一的组装点                 [Windows]
 app/
@@ -79,12 +79,12 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | --- | --- |
 | 格式化 | `cargo fmt --all` ；`pnpm -C app format` |
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` ；`pnpm -C app lint` ；`pnpm -C app typecheck` |
-| 跨平台单测（任意 OS） | `cargo nextest run -p procroute-proto -p procroute-config -p procroute-rules -p procroute-intercept -p procroute-relay -p procroute-platform-win` |
+| 跨平台单测（任意 OS） | `cargo nextest run -p procroute-proto -p procroute-config -p procroute-rules -p procroute-intercept -p procroute-relay -p procroute-platform-win -p procroute-core-mgr`（core-mgr 的 `sing-box check` 回归只在 Windows 上编译） |
 | 行覆盖率（C-TEST-01） | `cargo llvm-cov nextest -p <crate> --fail-under-lines 80`（`rules`、`config`、`relay` 在 CI 中强制） |
 | 全量单测（Windows） | `cargo nextest run --workspace` |
 | 前端单测 | `pnpm -C app test` |
 | 生成 IPC 的 TS 类型 | `cargo xtask gen-types` |
-| 拉取并校验第三方二进制 | `cargo xtask fetch-deps` |
+| 拉取并校验第三方二进制 | `cargo xtask fetch-deps`（Windows；按 `third_party/*/lock.json` 校验 SHA256，输出到 `third_party/sing-box/bin/`） |
 | 本地开发运行 | 开发机：`pnpm -C app dev`（模拟 IPC，不连真实服务）；完整联调：在测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
 | 打包安装包 | `cargo xtask bundle` |
 | 端到端测试 | `cargo xtask e2e --vm <name>`（只在 Hyper-V 虚拟机中运行） |
@@ -99,6 +99,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo xtask fetch-deps               # 仅 Windows：core-mgr 的 sing-box check 回归需要锁定版本的二进制
 cargo nextest run --workspace        # 非 Windows 环境下改为 3.2 节的跨平台单测
 cargo deny check
 pnpm -C app lint && pnpm -C app typecheck && pnpm -C app test

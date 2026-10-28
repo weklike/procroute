@@ -311,6 +311,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "procroute-core-mgr"
+version = "0.1.0"
+dependencies = [
+ "procroute-config",
+ "procroute-platform-win",
+ "procroute-proto",
+ "procroute-rules",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "procroute-intercept"
 version = "0.1.0"
 dependencies = [
@@ -365,6 +379,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "procroute-config",
+ "procroute-core-mgr",
  "procroute-platform-win",
  "procroute-proto",
  "procroute-rules",
@@ -859,7 +874,10 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "procroute-platform-win",
  "procroute-proto",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

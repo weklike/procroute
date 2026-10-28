@@ -122,9 +122,18 @@ export type HelloParams = { protocol_version: number, client_version: string, };
 export type HelloResult = { protocol_version: number, service_version: string, };
 
 /**
- * 导入时被跳过的一行及原因。`reason` 不得回显凭据。
+ * 导入时被跳过的一行及原因。
  */
-export type ImportIssue = { line: number, reason: string, };
+export type ImportIssue = { 
+/**
+ * 输入中的行号，从 1 开始；0 表示针对整段输入（例如 `clash_yaml_unsupported`）。
+ */
+line: number, 
+/**
+ * 稳定的原因代码（`snake_case`，例如 `unsupported_protocol`、`duplicate`），界面据此翻译。
+ * 只取固定代码，不回显输入内容与凭据（C-SEC-04）。
+ */
+reason: string, };
 
 /**
  * 返回给客户端的错误。
