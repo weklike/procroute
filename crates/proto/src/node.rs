@@ -87,16 +87,20 @@ pub struct NodeListResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NodeImportParams {
-    /// 一行一个分享链接。
+    /// 一行一个分享链接；也接受整体 Base64 的订阅内容与 SIP008 JSON。
+    /// 支持的格式见 `procroute-core-mgr::link`。
     ShareLinks { text: String },
     /// 新增订阅；服务负责拉取（C-SEC-07 限制大小与节点数）。
     Subscription { name: String, url: String },
 }
 
-/// 导入时被跳过的一行及原因。`reason` 不得回显凭据。
+/// 导入时被跳过的一行及原因。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ImportIssue {
+    /// 输入中的行号，从 1 开始；0 表示针对整段输入（例如 `clash_yaml_unsupported`）。
     pub line: u32,
+    /// 稳定的原因代码（`snake_case`，例如 `unsupported_protocol`、`duplicate`），界面据此翻译。
+    /// 只取固定代码，不回显输入内容与凭据（C-SEC-04）。
     pub reason: String,
 }
 

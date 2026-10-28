@@ -36,7 +36,7 @@ crates/
   procwatch/     进程追踪：ETW 事件 + Toolhelp 快照，维护进程树          [Windows]
   intercept/     Interceptor trait 与后端：divert/、tun/（预留 ndis/）  [Windows；trait、判定逻辑与 mock 跨平台]
   relay/         NAT 表、本地 TCP/UDP 中继、SOCKS5 客户端               [跨平台]
-  core-mgr/      节点模型、sing-box 配置生成、子进程守护、控制 API 客户端  [Windows；节点模型与配置生成跨平台]
+  core-mgr/      节点模型与分享链接解析、sing-box 配置生成、子进程守护、控制 API 客户端  [Windows；守护以外跨平台]
   platform-win/  Windows API 封装：路径规范化、DPAPI、ACL、服务控制      [Windows；Secret<T> 跨平台]
   svc/           二进制：Windows 服务入口，唯一的组装点                 [Windows]
 app/

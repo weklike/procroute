@@ -23,6 +23,8 @@ mod handlers;
 #[cfg(windows)]
 mod ipc_server;
 #[cfg(windows)]
+mod node_store;
+#[cfg(windows)]
 mod store;
 
 #[cfg(not(windows))]
@@ -56,6 +58,7 @@ mod windows_main {
     use crate::client_auth::ClientAuth;
     use crate::handlers::Services;
     use crate::ipc_server::{ServerConfig, serve};
+    use crate::node_store::NodeStore;
     use crate::store::ProfileStore;
 
     /// 服务名，与安装器注册时一致。
@@ -110,7 +113,8 @@ mod windows_main {
 
     fn services(root: &Path) -> anyhow::Result<Arc<Services>> {
         let profiles = ProfileStore::open(root.join("profiles")).context("open profile store")?;
-        Ok(Arc::new(Services::new(profiles)))
+        let nodes = NodeStore::open(root.join("nodes.json")).context("open node store")?;
+        Ok(Arc::new(Services::new(profiles, nodes)))
     }
 
     fn server_config() -> ServerConfig {

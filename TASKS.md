@@ -43,7 +43,7 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-055、T-057、T-058（部分，见下）、T-060 ~ T-062 | T-058 的 node.*；T-056（需要 Windows） |
+| M1 | T-050 ~ T-055、T-057、T-058（部分，见下）、T-060 ~ T-062 | T-056（需要 Windows）；订阅拉取待定依赖（见下） |
 | M2 | T-070、T-073、T-074 | T-071（需要 Windows） |
 | M3 | T-090、T-096、T-097 | T-091（需要 Windows）；T-092、T-095 依赖 T-055 |
 
@@ -67,9 +67,22 @@
   `authenticode`、`service` 模块；客户端校验单独放 `crates/svc/src/client_auth.rs`。管道上一行一条 JSON-RPC 消息
   （`\n` 或 `\r\n` 结尾，不含行尾不超过 1 MiB）。签名校验关闭吊销检查、只用本地缓存（C-SEC-08）。
   开发构建可开 `insecure-skip-client-auth` 特性跳过客户端校验，release 构建开启会编译失败（C-SEC-02）。
-- T-058 只完成了一部分：`profile.*`、`session.status`/`session.stop`、配置目录 ACL（`platform-win::dir_acl`，C-SEC-05）、
-  服务模式日志 `logs\svc.log`。`session.start` 返回 `kernel.unavailable`（等 T-055）；`node.*` 等未接入的方法返回
-  `internal.error`，不假装成功。DPAPI（T-053）因此暂无调用方。日志暂无轮转。
+- T-058 只完成了一部分：`profile.*`、`session.status`/`session.stop`、`node.import`（分享链接）/ `node.list`、
+  配置目录 ACL（`platform-win::dir_acl`，C-SEC-05）、服务模式日志 `logs\svc.log`。`session.start` 返回
+  `kernel.unavailable`（等 T-056 守护进程）；`node.test` 返回 `kernel.unavailable`；订阅导入返回 `node.import_failed`；
+  其他未接入的方法返回 `internal.error`，不假装成功。日志暂无轮转。
+- node.import 的支持范围（近五年主流客户端通用、且 sing-box 1.14.4 支持；详见 `core-mgr::link` 模块文档）：
+  `ss://`（SIP002 / 旧版整段 Base64，AEAD 与 2022 加密，插件 obfs-local / v2ray-plugin）、`vmess://`（v2rayN JSON，
+  只收 AEAD）、`vless://` / `trojan://`（Xray 分享链接标准，含 REALITY 与 Vision）、`hysteria2://` / `hy2://`、`tuic://`（v5）、
+  `anytls://`、`socks(5)://`、`http(s)://`；订阅内容支持纯文本、整体 Base64 与 SIP008 JSON。不收录 SSR、Hysteria 1、
+  SS 流加密、VMess alterId > 0、xhttp / kcp / quic 传输、WireGuard、NaiveProxy、ShadowTLS；Hysteria2 的 `pinSHA256`
+  无等价选项，拒绝而不是丢弃。分享链接与 URI / Base64 解析手写，未引入新依赖。
+  - 跳过原因是固定的原因代码（如 `unsupported_protocol`、`duplicate`），不回显输入；界面目前原样显示，
+    **待办**：在 `app/` 里按代码走 i18n 翻译（本次没有改前端，开发机上没有 pnpm 环境）。
+  - 存储：`<配置根>\nodes.json`，参数明文、凭据按节点 DPAPI 加密后十六进制存放（C-SEC-04）；读失败时不覆盖。
+    每个节点暂时就是一个 `single` 出站（标签 = 节点 id），节点组的增删改还没有 IPC 方法。
+  - **待定**：订阅拉取需要服务端 HTTP 客户端（新的运行时依赖，AGENTS 第 8 节第 2 条）；Clash / mihomo YAML
+    订阅需要 YAML 解析库，同样待确认后再接。
 - 服务启动后禁用多余令牌特权（C-SEC-06）尚未实现，随 T-056（sing-box 守护）一起做。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
 - sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的

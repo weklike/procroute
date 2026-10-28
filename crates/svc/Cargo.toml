@@ -17,6 +17,7 @@ insecure-skip-client-auth = []
 [target.'cfg(windows)'.dependencies]
 anyhow = "1.0.104"
 procroute-config = { path = "../config" }
+procroute-core-mgr = { path = "../core-mgr" }
 procroute-platform-win = { path = "../platform-win" }
 procroute-proto = { path = "../proto" }
 procroute-rules = { path = "../rules" }

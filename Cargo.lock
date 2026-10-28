@@ -379,6 +379,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "procroute-config",
+ "procroute-core-mgr",
  "procroute-platform-win",
  "procroute-proto",
  "procroute-rules",
