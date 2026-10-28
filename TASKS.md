@@ -38,6 +38,16 @@
 
 ---
 
+## 进度
+
+| 阶段 | 已完成 | 下一条 |
+| --- | --- | --- |
+| M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
+| M1 | — | T-050（需要 Windows） |
+
+偏离原计划的地方：`Profile` 定义在 proto，rules 依赖 proto 而非 config（docs/adr/0001）；
+前端 Tauri 事件名把 `.` 换成 `:`，例如 `conn.subscribe` → `ipc:conn:subscribe`（app/src/api/client.ts）。
+
 ## 阶段 M0 — 脚手架与可跨平台内核（第 1–2 周）
 
 ### T-000 workspace 骨架
@@ -265,6 +275,7 @@
 - 产出：`app/src/routes/*`、`app/src/App.tsx`、`app/src/i18n/*`
 - 约束：C-CODE-06、C-UI-04
 - 做什么：TanStack Router 配置方案/节点/连接/日志/设置五个路由；接 QueryClientProvider；i18n 初始化 zh-CN/en-US。
+  另外：未检测到 Tauri 运行环境时（`pnpm -C app dev` 在浏览器里打开），`src/api/client.ts` 改用内存里的模拟服务，返回设计稿里的示例数据，方便在开发机上做界面而不连真实服务。
 - 验收：`pnpm -C app build` 通过；`pnpm -C app test` 下路由冒烟测试通过。
 
 ### T-061 app：节点与方案的 feature 模块

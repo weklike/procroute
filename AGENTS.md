@@ -84,7 +84,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | 前端单测 | `pnpm -C app test` |
 | 生成 IPC 的 TS 类型 | `cargo xtask gen-types` |
 | 拉取并校验第三方二进制 | `cargo xtask fetch-deps` |
-| 本地开发运行 | `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端） |
+| 本地开发运行 | 开发机：`pnpm -C app dev`（模拟 IPC，不连真实服务）；完整联调：在测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
 | 打包安装包 | `cargo xtask bundle` |
 | 端到端测试 | `cargo xtask e2e --vm <name>`（只在 Hyper-V 虚拟机中运行） |
 | 依赖与许可审计 | `cargo deny check` ；`pnpm -C app audit` |

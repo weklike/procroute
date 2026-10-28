@@ -11,6 +11,8 @@ yanked = "deny"
 [licenses]
 version = 2
 confidence-threshold = 0.9
+# 白名单是政策，不要求每项都已出现
+unused-allowed-license = "allow"
 allow = [
     "MIT",
     "Apache-2.0",
