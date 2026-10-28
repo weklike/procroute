@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Windows 平台封装（T-050）。
 //!
-//! 本 crate 是除 `intercept::*::ffi` 之外唯一允许出现 `unsafe` 的地方（C-CODE-01），
-//! 每处 `unsafe` 块上方必须有 `// SAFETY:` 注释。目前还没有任何 `unsafe`，所以仍沿用
-//! workspace 的 `unsafe_code = "forbid"`；第一个需要它的模块落地时，改为本 crate 自己的
-//! `[lints]` 配置并在该模块上局部放开。
+//! 本 crate 是除 `intercept::*::ffi` 之外唯一允许出现 `unsafe` 的地方（C-CODE-01）：
+//! crate 级别 `unsafe_code = "deny"`，只有需要调用 Win32 API 的模块用
+//! `#![allow(unsafe_code)]` 局部放开，每处 `unsafe` 块上方必须有 `// SAFETY:` 注释
+//! （由 `clippy::undocumented_unsafe_blocks` 强制）。
 //!
 //! 模块划分：
 //!
@@ -24,3 +24,5 @@ pub mod dpapi;
 pub mod path;
 #[cfg(windows)]
 pub mod service;
+#[cfg(windows)]
+mod wide;

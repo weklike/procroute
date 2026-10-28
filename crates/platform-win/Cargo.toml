@@ -8,8 +8,28 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Windows API 依赖（windows-rs）在第一个真正调用它的模块（T-052 起）随实现一起加入，
-# 放在 [target.'cfg(windows)'.dependencies] 下，保证本 crate 在 Linux CI 上仍可编译。
+[dependencies]
+procroute-rules = { path = "../rules" }
 
-[lints]
-workspace = true
+# Win32 API 用 windows-sys：tokio/mio 已经依赖同一版本，不额外引入第二个 Windows 绑定库（C-DEP-03）。
+# 放在 cfg(windows) 下，保证本 crate 在 Linux CI 上仍可编译。
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61.2"
+features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+]
+
+# 本 crate 是允许 `unsafe` 的两处之一（C-CODE-01）：crate 级别为 deny，只在需要调用
+# Win32 API 的模块上用 `#![allow(unsafe_code)]` 局部放开，每个 unsafe 块必须带 SAFETY 注释。
+# 其余 lint 与 workspace 保持一致。
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "deny"
