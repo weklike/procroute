@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 procroute-rules = { path = "../rules" }
+thiserror = "2.0.21"
 
 # Win32 API 用 windows-sys：tokio/mio 已经依赖同一版本，不额外引入第二个 Windows 绑定库（C-DEP-03）。
 # 放在 cfg(windows) 下，保证本 crate 在 Linux CI 上仍可编译。
@@ -17,6 +18,7 @@ procroute-rules = { path = "../rules" }
 version = "0.61.2"
 features = [
     "Win32_Foundation",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
 ]
 
