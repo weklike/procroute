@@ -8,3 +8,9 @@ Licensed under GPL-3.0-or-later. See LICENSE.
   名称、版本、许可证、源码获取方式
 
 （暂无随包分发的第三方二进制）
+
+随源码分发的第三方源代码
+--------------------------------------------------------
+shadcn/ui（new-york-v4 组件源码，位于 app/src/components/ui/）
+  许可证：MIT，Copyright (c) 2023 shadcn
+  源码：https://github.com/shadcn-ui/ui
