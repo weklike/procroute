@@ -284,6 +284,16 @@ const zhCN = {
     noMatch: '没有符合筛选条件的连接',
     footer: '最多保留最近 {{cap}} 条事件，列表按需渲染',
   },
+  log: {
+    levels: { all: '全部', debug: '调试', info: '信息', warn: '警告', error: '错误' },
+    levelFilter: '日志级别',
+    module: '模块',
+    search: '搜索日志，例如 pid=4120',
+    list: '日志列表',
+    empty: '暂无日志',
+    noMatch: '没有符合筛选条件的日志',
+    footer: '实时滚动，最多显示最近 {{cap}} 行',
+  },
   settings: {
     general: '常规',
     language: '界面语言',

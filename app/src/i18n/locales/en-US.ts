@@ -310,6 +310,16 @@ const enUS: Messages = {
     noMatch: 'No connections match the filters',
     footer: 'Keeps the latest {{cap}} events; rows render on demand',
   },
+  log: {
+    levels: { all: 'All', debug: 'Debug', info: 'Info', warn: 'Warning', error: 'Error' },
+    levelFilter: 'Log level',
+    module: 'Module',
+    search: 'Search logs, e.g. pid=4120',
+    list: 'Log entries',
+    empty: 'No logs yet',
+    noMatch: 'No log entries match the filters',
+    footer: 'Live; shows the latest {{cap}} lines',
+  },
   settings: {
     general: 'General',
     language: 'Language',
