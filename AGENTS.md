@@ -47,7 +47,7 @@ app/
     components/    通用组件；components/ui/ 为 shadcn/ui 组件源码
     hooks/         通用 hooks，含 useIpcSubscription
     stores/        Zustand store（只放纯前端状态）
-    api/           IPC 客户端与类型（生成代码，禁止手改）
+    api/           generated.ts 由 gen-types 生成（禁止手改）；client.ts 为手写 IPC 薄封装
     i18n/          zh-CN / en-US 文案资源
 third_party/
   windivert/     锁定版本的 dll/sys + SHA256 + LICENSE（只读）
