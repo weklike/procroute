@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub mod profile;
+pub mod session;
 
 /// IPC 协议版本。破坏性变更必须加一（C-ARCH-07）。
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
