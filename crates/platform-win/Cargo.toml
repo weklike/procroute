@@ -18,9 +18,22 @@ thiserror = "2.0.21"
 version = "0.61.2"
 features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
 ]
+
+# 控制管道用 tokio 的命名管道实现（异步运行时统一 tokio，AGENTS 5.1）。
+[target.'cfg(windows)'.dependencies.tokio]
+version = "1.54.1"
+features = ["net"]
+
+[target.'cfg(windows)'.dev-dependencies.tokio]
+version = "1.54.1"
+features = ["net", "rt", "macros", "io-util"]
 
 # 本 crate 是允许 `unsafe` 的两处之一（C-CODE-01）：crate 级别为 deny，只在需要调用
 # Win32 API 的模块上用 `#![allow(unsafe_code)]` 局部放开，每个 unsafe 块必须带 SAFETY 注释。
