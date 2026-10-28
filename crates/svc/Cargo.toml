@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "procroute-svc"
+description = "ProcRoute 的 Windows 服务：唯一的特权进程与组装点"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# 开发构建跳过控制管道客户端的路径与签名校验（C-SEC-02）。
+# release 构建（未开启 debug_assertions）同时开启它会直接编译失败，见 src/main.rs。
+insecure-skip-client-auth = []
+
+# 服务只在 Windows 上有意义；其他平台只编译一个提示后退出的 main，保证 workspace 在 Linux CI 上可编译。
+[target.'cfg(windows)'.dependencies]
+anyhow = "1.0.104"
+procroute-config = { path = "../config" }
+procroute-platform-win = { path = "../platform-win" }
+procroute-proto = { path = "../proto" }
+procroute-rules = { path = "../rules" }
+serde = "1.0.229"
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[lints]
+workspace = true
