@@ -43,7 +43,7 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050（Windows 模块为占位）、T-051、T-060 ~ T-062 | T-052 ~ T-054（需要 Windows）；T-055 需先锁定 sing-box 版本 |
+| M1 | T-050 ~ T-054、T-057、T-058（部分，见下）、T-060 ~ T-062 | T-055 需先锁定 sing-box 版本；T-058 的 node.* 需先定分享链接/订阅的支持范围 |
 | M2 | T-070、T-073、T-074 | T-071（需要 Windows） |
 | M3 | T-090、T-096、T-097 | T-091（需要 Windows）；T-092、T-095 依赖 T-055 |
 
@@ -57,7 +57,20 @@
   生产构建通过 `import.meta.env.DEV` 整体剔除，不随安装包分发示例地址（C-SEC-09）。
 - ui.shadcn.com 在构建环境中不可达，`components/ui/` 的组件源码取自 shadcn-ui/ui 仓库（MIT，见 NOTICE）。
   表单里的下拉框使用原生 `<select>` 包装（`components/NativeSelect.tsx`），便于 register 与测试。
-- T-050 的 `path`/`dpapi`/`acl`/`service` 只是 `cfg(windows)` 占位，windows-rs 依赖随 T-052 起的实现一起加入。
+- Win32 绑定用 `windows-sys` 0.61（tokio/mio 已依赖同一版本），没有再引入 `windows` crate（C-DEP-03）。
+  platform-win 用自己的 `[lints]`：crate 级 `unsafe_code = "deny"`，只在调用 Win32 的模块局部放开，
+  并开启 `clippy::undocumented_unsafe_blocks`。
+- T-054：交互用户在管道 DACL 里拿到的是 `GRGW` 而不是更窄的掩码。标准客户端打开方式（`GENERIC_READ|GENERIC_WRITE`）
+  会请求 `FILE_APPEND_DATA`（对管道即 `FILE_CREATE_PIPE_INSTANCE`），收窄会让 UI 连不上，而自定义掩码打开需要
+  UI 侧 `unsafe`。只有交互用户本人能因此添加实例；名字抢注由 `FILE_FLAG_FIRST_PIPE_INSTANCE` 挡住。详见 `acl.rs` 模块文档。
+- T-057：Win32 部分（管道客户端 PID/映像/SID、Authenticode、服务分派器）放在 platform-win 的 `process`、
+  `authenticode`、`service` 模块；客户端校验单独放 `crates/svc/src/client_auth.rs`。管道上一行一条 JSON-RPC 消息
+  （`\n` 或 `\r\n` 结尾，不含行尾不超过 1 MiB）。签名校验关闭吊销检查、只用本地缓存（C-SEC-08）。
+  开发构建可开 `insecure-skip-client-auth` 特性跳过客户端校验，release 构建开启会编译失败（C-SEC-02）。
+- T-058 只完成了一部分：`profile.*`、`session.status`/`session.stop`、配置目录 ACL（`platform-win::dir_acl`，C-SEC-05）、
+  服务模式日志 `logs\svc.log`。`session.start` 返回 `kernel.unavailable`（等 T-055）；`node.*` 等未接入的方法返回
+  `internal.error`，不假装成功。DPAPI（T-053）因此暂无调用方。日志暂无轮转。
+- 服务启动后禁用多余令牌特权（C-SEC-06）尚未实现，随 T-056（sing-box 守护）一起做。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
 - T-055 / T-092 / T-095（sing-box 配置生成）暂缓：需要先在 `third_party/sing-box/` 锁定版本与 SHA256（单独 PR，C-DEP-04），
   再用该版本的 `sing-box check` 做回归；生成器必须以锁定版本的配置格式为准（AGENTS 第 9 节）。
