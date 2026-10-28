@@ -80,3 +80,5 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - name: 生产构建不含模拟服务与示例数据（C-SEC-09）
+        run: "! grep -rlE 'createMockService|example\.(net|com)' dist"
