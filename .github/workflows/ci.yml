@@ -23,13 +23,19 @@ jobs:
         run: rustup show
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-deny
+          tool: cargo-nextest,cargo-deny,cargo-llvm-cov
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo nextest run --workspace --no-tests=warn
+      - name: 行覆盖率不低于 80%（C-TEST-01）
+        run: |
+          rustup component add llvm-tools-preview
+          for p in procroute-rules procroute-config procroute-relay; do
+            cargo llvm-cov nextest -p "$p" --fail-under-lines 80 --summary-only
+          done
       - name: deny
         run: cargo deny check
       - name: 前端类型与 proto 一致（C-ARCH-04）
