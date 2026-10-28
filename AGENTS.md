@@ -34,10 +34,10 @@ crates/
   config/        Profile / 规则模型、校验、schema 迁移                 [跨平台]
   rules/         进程匹配引擎，纯函数，无 IO                           [跨平台]
   procwatch/     进程追踪：ETW 事件 + Toolhelp 快照，维护进程树          [Windows]
-  intercept/     Interceptor trait 与后端：divert/、tun/（预留 ndis/）  [Windows]
-  relay/         NAT 表、本地 TCP/UDP 中继、SOCKS5 客户端               [Windows]
+  intercept/     Interceptor trait 与后端：divert/、tun/（预留 ndis/）  [Windows；trait、判定逻辑与 mock 跨平台]
+  relay/         NAT 表、本地 TCP/UDP 中继、SOCKS5 客户端               [跨平台]
   core-mgr/      sing-box 配置生成、子进程守护、控制 API 客户端          [Windows]
-  platform-win/  Windows API 封装：路径规范化、DPAPI、ACL、服务控制      [Windows]
+  platform-win/  Windows API 封装：路径规范化、DPAPI、ACL、服务控制      [Windows；Secret<T> 跨平台]
   svc/           二进制：Windows 服务入口，唯一的组装点                 [Windows]
 app/
   src-tauri/     Rust：IPC 客户端、托盘、自动更新（只依赖 proto）
@@ -71,7 +71,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 - Rust：版本由 `rust-toolchain.toml` 锁定，edition 2024。
 - Node.js：当前 LTS，版本以 `.nvmrc` 为准；包管理器 pnpm（版本见 `package.json` 的 `packageManager`）。
 - Windows 10 22H2+ / Windows 11 x64：编译和测试 `[Windows]` 标记的 crate 需要。
-- 跨平台 crate（`proto`、`config`、`rules`）可在 Linux / macOS 上开发和测试。
+- 跨平台 crate（`proto`、`config`、`rules`、`relay`，以及 `intercept` 的 trait 与 mock、`platform-win` 的 `Secret<T>`）可在 Linux / macOS 上开发和测试。
 
 ### 3.2 常用命令
 
@@ -79,7 +79,8 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | --- | --- |
 | 格式化 | `cargo fmt --all` ；`pnpm -C app format` |
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` ；`pnpm -C app lint` ；`pnpm -C app typecheck` |
-| 跨平台单测（任意 OS） | `cargo nextest run -p procroute-proto -p procroute-config -p procroute-rules` |
+| 跨平台单测（任意 OS） | `cargo nextest run -p procroute-proto -p procroute-config -p procroute-rules -p procroute-intercept -p procroute-relay -p procroute-platform-win` |
+| 行覆盖率（C-TEST-01） | `cargo llvm-cov nextest -p <crate> --fail-under-lines 80`（`rules`、`config`、`relay` 在 CI 中强制） |
 | 全量单测（Windows） | `cargo nextest run --workspace` |
 | 前端单测 | `pnpm -C app test` |
 | 生成 IPC 的 TS 类型 | `cargo xtask gen-types` |
@@ -98,7 +99,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace        # 非 Windows 环境下改为跨平台三件套
+cargo nextest run --workspace        # 非 Windows 环境下改为 3.2 节的跨平台单测
 cargo deny check
 pnpm -C app lint && pnpm -C app typecheck && pnpm -C app test
 ```

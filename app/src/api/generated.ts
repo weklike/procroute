@@ -77,6 +77,24 @@ export type ErrorCode = "ipc.version_mismatch" | "ipc.invalid_request" | "ipc.pa
 export type FailPolicy = "block" | "allow";
 
 /**
+ * 某个字段上的一个问题。
+ */
+export type FieldIssue = { 
+/**
+ * 出问题的字段，例如 `groups[1].match[0].value`。
+ */
+path: string, code: FieldIssueCode, 
+/**
+ * 给开发者看的细节；界面文案按 `code` 取。
+ */
+message: string, };
+
+/**
+ * 字段校验问题的种类。界面按它从 i18n 资源取文案，并标到对应字段上。
+ */
+export type FieldIssueCode = "schema_version" | "empty" | "too_long" | "too_many" | "invalid_id" | "invalid_tag" | "control_char" | "duplicate_tag" | "no_matchers" | "invalid_rule";
+
+/**
  * 进程组：同一组的进程走同一个出站。
  */
 export type Group = { 
@@ -111,7 +129,11 @@ export type ImportIssue = { line: number, reason: string, };
 /**
  * 返回给客户端的错误。
  */
-export type IpcError = { code: ErrorCode, message: string, };
+export type IpcError = { code: ErrorCode, message: string, 
+/**
+ * 逐字段的校验问题（例如 `profile.invalid_schema`）；没有时省略。
+ */
+fields?: Array<FieldIssue>, };
 
 /**
  * 单个节点的测速结果。

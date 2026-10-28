@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use procroute_proto::error::{ErrorCode, FieldIssue, FieldIssueCode, IpcError};
 use procroute_proto::profile::{MatchRule, PROFILE_SCHEMA_VERSION, Profile};
 use procroute_rules::matcher::{Matcher, RuleError};
 use thiserror::Error;
@@ -47,6 +48,41 @@ pub enum IssueKind {
     NoMatchers,
     #[error(transparent)]
     Rule(#[from] RuleError),
+}
+
+impl IssueKind {
+    /// 对应的 IPC 字段问题码。
+    pub fn code(&self) -> FieldIssueCode {
+        match self {
+            IssueKind::SchemaVersion { .. } => FieldIssueCode::SchemaVersion,
+            IssueKind::Empty => FieldIssueCode::Empty,
+            IssueKind::TooLong { .. } => FieldIssueCode::TooLong,
+            IssueKind::TooMany { .. } => FieldIssueCode::TooMany,
+            IssueKind::InvalidId => FieldIssueCode::InvalidId,
+            IssueKind::InvalidTag => FieldIssueCode::InvalidTag,
+            IssueKind::ControlChar => FieldIssueCode::ControlChar,
+            IssueKind::DuplicateTag(_) => FieldIssueCode::DuplicateTag,
+            IssueKind::NoMatchers => FieldIssueCode::NoMatchers,
+            IssueKind::Rule(_) => FieldIssueCode::InvalidRule,
+        }
+    }
+}
+
+/// 把校验问题转成 `profile.invalid_schema` 错误，界面据此把问题标到对应字段上。
+pub fn to_ipc_error(issues: &[ValidationIssue]) -> IpcError {
+    let fields = issues
+        .iter()
+        .map(|i| FieldIssue {
+            path: i.path.clone(),
+            code: i.kind.code(),
+            message: i.kind.to_string(),
+        })
+        .collect();
+    IpcError::new(
+        ErrorCode::ProfileInvalidSchema,
+        format!("{} 个字段未通过校验", issues.len()),
+    )
+    .with_fields(fields)
 }
 
 /// 校验整个方案；没有问题时返回 `Ok(())`。
@@ -225,6 +261,27 @@ mod tests {
                 "groups[1].match",
                 "exclude[1].value",
             ]
+        );
+    }
+
+    #[test]
+    fn issues_convert_to_an_ipc_error_with_field_codes() {
+        let mut p = valid();
+        p.name = String::new();
+        p.groups.push(p.groups[0].clone());
+        let issues = validate(&p).unwrap_err();
+        let e = to_ipc_error(&issues);
+        assert_eq!(e.code, ErrorCode::ProfileInvalidSchema);
+        let fields = e.fields.unwrap();
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "name" && f.code == FieldIssueCode::Empty)
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "groups[1].tag" && f.code == FieldIssueCode::DuplicateTag)
         );
     }
 

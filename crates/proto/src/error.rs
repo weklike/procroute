@@ -115,11 +115,42 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+/// 字段校验问题的种类。界面按它从 i18n 资源取文案，并标到对应字段上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldIssueCode {
+    SchemaVersion,
+    Empty,
+    TooLong,
+    TooMany,
+    InvalidId,
+    InvalidTag,
+    ControlChar,
+    DuplicateTag,
+    NoMatchers,
+    /// 匹配规则无法编译（正则、通配符语法错误等）。
+    InvalidRule,
+}
+
+/// 某个字段上的一个问题。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FieldIssue {
+    /// 出问题的字段，例如 `groups[1].match[0].value`。
+    pub path: String,
+    pub code: FieldIssueCode,
+    /// 给开发者看的细节；界面文案按 `code` 取。
+    pub message: String,
+}
+
 /// 返回给客户端的错误。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct IpcError {
     pub code: ErrorCode,
     pub message: String,
+    /// 逐字段的校验问题（例如 `profile.invalid_schema`）；没有时省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fields: Option<Vec<FieldIssue>>,
 }
 
 impl IpcError {
@@ -127,7 +158,14 @@ impl IpcError {
         Self {
             code,
             message: message.into(),
+            fields: None,
         }
+    }
+
+    /// 附上逐字段的校验问题。
+    pub fn with_fields(mut self, fields: Vec<FieldIssue>) -> Self {
+        self.fields = (!fields.is_empty()).then_some(fields);
+        self
     }
 }
 
@@ -164,6 +202,26 @@ mod tests {
                 "{s}"
             );
         }
+    }
+
+    #[test]
+    fn field_issues_are_omitted_when_empty_and_round_trip_otherwise() {
+        let plain = IpcError::new(ErrorCode::ProfileNotFound, "x").with_fields(vec![]);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("fields"), "{json}");
+        assert_eq!(serde_json::from_str::<IpcError>(&json).unwrap(), plain);
+
+        let e = IpcError::new(ErrorCode::ProfileInvalidSchema, "2 issues").with_fields(vec![
+            FieldIssue {
+                path: "groups[0].tag".into(),
+                code: FieldIssueCode::DuplicateTag,
+                message: "dup".into(),
+            },
+        ]);
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["fields"][0]["path"], "groups[0].tag");
+        assert_eq!(v["fields"][0]["code"], "duplicate_tag");
+        assert_eq!(serde_json::from_value::<IpcError>(v).unwrap(), e);
     }
 
     #[test]

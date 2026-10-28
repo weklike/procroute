@@ -2,10 +2,23 @@
 // 手写的 IPC 薄封装（T-041）。同目录的 generated.ts 是生成文件，禁止手改（C-ARCH-04）。
 //
 // 只有 features/<领域>/api.ts 与 hooks/ 可以导入本文件；组件禁止直接调用（C-CODE-09，lint 强制）。
-import { invoke } from '@tauri-apps/api/core'
+//
+// 开发构建里、且不在 Tauri 里运行时（`pnpm -C app dev` 用浏览器打开、或单元测试），改用 ./mock
+// 里的内存模拟服务，方便在开发机上做界面而不连真实服务。生产构建中 `import.meta.env.DEV` 为常量
+// false，模拟服务连同示例数据被整体剔除，不会随安装包分发（C-SEC-09）。
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
-import type { ErrorCode, IpcChannel, IpcEvent, IpcMethod, IpcRequest, IpcResult } from './generated'
+import type {
+  ErrorCode,
+  FieldIssue,
+  IpcChannel,
+  IpcEvent,
+  IpcMethod,
+  IpcRequest,
+  IpcResult,
+} from './generated'
+import type { MockService } from './mock/service'
 
 /** Tauri 后端里转发 IPC 请求的命令名。 */
 export const IPC_COMMAND = 'ipc_call'
@@ -19,12 +32,25 @@ export function tauriEventName(channel: IpcChannel): string {
   return `ipc:${channel.replaceAll('.', ':')}`
 }
 
+let mockService: Promise<MockService> | null = null
+
+function shouldUseMock(): boolean {
+  return import.meta.env.DEV && !isTauri()
+}
+
+/** 浏览器开发与测试用的模拟服务；首次使用时创建。 */
+function mock(): Promise<MockService> {
+  mockService ??= import('./mock/service').then((m) => m.createMockService())
+  return mockService
+}
+
 /** 单次请求：方法名 + 入参 → 结果；失败统一抛出 IpcError。 */
 export async function call<M extends IpcMethod>(
   method: M,
   params: IpcRequest[M],
 ): Promise<IpcResult[M]> {
   try {
+    if (shouldUseMock()) return await (await mock()).call(method, params)
     return await invoke<IpcResult[M]>(IPC_COMMAND, { method, params })
   } catch (e) {
     throw IpcError.from(e)
@@ -32,10 +58,11 @@ export async function call<M extends IpcMethod>(
 }
 
 /** 订阅事件通道。返回的取消函数必须在组件卸载时调用（C-CODE-10）。 */
-export function subscribe<E extends IpcChannel>(
+export async function subscribe<E extends IpcChannel>(
   channel: E,
   onEvent: (payload: IpcEvent[E]) => void,
 ): Promise<UnlistenFn> {
+  if (shouldUseMock()) return (await mock()).subscribe(channel, onEvent)
   return listen<IpcEvent[E]>(tauriEventName(channel), (e) => {
     onEvent(e.payload)
   })
@@ -46,16 +73,19 @@ export type ClientErrorCode = ErrorCode | 'ipc.transport'
 
 export class IpcError extends Error {
   readonly code: ClientErrorCode
+  /** 逐字段的校验问题；表单据此把错误标到对应字段上。 */
+  readonly fields: readonly FieldIssue[]
 
-  constructor(code: ClientErrorCode, message: string) {
+  constructor(code: ClientErrorCode, message: string, fields: readonly FieldIssue[] = []) {
     super(message)
     this.name = 'IpcError'
     this.code = code
+    this.fields = fields
   }
 
   static from(e: unknown): IpcError {
     if (e instanceof IpcError) return e
-    if (isStructured(e)) return new IpcError(e.code, e.message)
+    if (isStructured(e)) return new IpcError(e.code, e.message, fieldsOf(e))
     return new IpcError('ipc.transport', e instanceof Error ? e.message : String(e))
   }
 }
@@ -64,4 +94,16 @@ function isStructured(e: unknown): e is { code: ErrorCode; message: string } {
   if (typeof e !== 'object' || e === null) return false
   const o = e as Record<string, unknown>
   return typeof o.code === 'string' && o.code.includes('.') && typeof o.message === 'string'
+}
+
+function fieldsOf(e: object): FieldIssue[] {
+  const fields = (e as { fields?: unknown }).fields
+  if (!Array.isArray(fields)) return []
+  return fields.filter(
+    (f): f is FieldIssue =>
+      typeof f === 'object' &&
+      f !== null &&
+      typeof (f as Record<string, unknown>).path === 'string' &&
+      typeof (f as Record<string, unknown>).code === 'string',
+  )
 }

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "procroute-intercept"
+description = "拦截层：Interceptor trait 与各后端（divert/、tun/），以及跨平台的假后端"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# 上层（svc 的集成测试等）在非 Windows 上使用假后端
+mock = []
+
+[dependencies]
+procroute-proto = { path = "../proto" }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
