@@ -43,7 +43,7 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-058（T-058 余下 `node.test`，见下）、T-060 ~ T-062 | TUN + `block` 的 fail-closed：服务持有的动态 WFP 过滤器（2026-10-29 已定，需要虚拟机验证）；`node.test` |
+| M1 | T-050 ~ T-058（T-058 余下 `node.test`，见下）、T-060 ~ T-062 | 在虚拟机里验证 TUN + `block` 的 WFP 阻断（`procroute-platform-win --features vm-tests`）；`node.test` |
 | M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074 | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
 | M3 | T-090、T-092（中继嗅探 + 远程 DNS，见下）、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-095 的接线随 T-078 |
 | M4 | T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
@@ -147,10 +147,12 @@
   - TUN `dns_mode` 显式 `disabled`：1.14 开启 `auto_route` 时默认 `hijack`，等同系统 DNS 接管（C-NET-09）；
   - `urltest` 组的测速地址必须由用户配置，不使用 sing-box 内置的默认地址（C-SEC-08、C-SEC-09）；
   - TUN 模式下 `include_children` 不生效（sing-box 只按发起连接的进程判定）。
-  - **待定（C-NET-03）**：sing-box 退出时（崩溃、重启间隙、超出重启上限）TUN 与路由随之撤销，目标进程会回落直连，
-    所以 TUN 模式目前不允许 `fail_policy = block`（`session.start` 返回 `session.fail_closed_unsupported`）。
-    要支持它需要一个不依赖 sing-box 存活的阻断手段，例如服务持有的动态 WFP 过滤器（按进程路径阻断目标进程在非 TUN
-    网卡上的连接；名称 / 目录 / 通配规则还需要进程追踪），待确认方案后再做。
+  - C-NET-03（2026-10-29 定为动态 WFP 过滤器）：sing-box 退出时 TUN 与路由随之撤销。`block` 策略的 TUN 会话在
+    内核启动前由 `svc::fail_closed` 装上过滤器（`platform-win::wfp`）：对每个目标可执行文件，本地地址在 TUN 网段内
+    放行，远端为回环 / 链路本地 / 组播放行，其余阻断；动态会话随服务退出自动删除（C-NET-06）。名称、目录、通配、
+    正则规则靠扫描运行中的进程（启动时一次，之后每 500 ms），**已知窗口**：内核不在时新启动的命中进程最多 500 ms
+    没有保护，进程追踪（T-079）接入后消除。过滤器装不上则不启动会话（`session.fail_closed_unsupported`）。
+    **待验证**：`crates/platform-win/tests/wfp_vm.rs` 在虚拟机里以管理员身份运行。
 
 ## 阶段 M0 — 脚手架与可跨平台内核（第 1–2 周）
 
