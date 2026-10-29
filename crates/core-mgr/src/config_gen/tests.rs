@@ -11,6 +11,7 @@ use super::*;
 use crate::outbound::tests::sample_nodes;
 
 const SNAPSHOT: &str = "snapshots/tun_sample.json";
+const PRECISE_SNAPSHOT: &str = "snapshots/precise_sample.json";
 
 fn m(kind: MatchType, value: &str, recursive: bool) -> MatchRule {
     MatchRule {
@@ -404,16 +405,20 @@ fn rejects_broken_nodes_and_runtime() {
             api_secret: Secret::new("0123456789abcdef0123456789abcde!".into()),
             ..runtime()
         },
-        Runtime {
-            self_exe_paths: vec![],
-            ..runtime()
-        },
     ] {
         assert!(matches!(
             generate_tun(&p, &nodes(), &[], &rt),
-            Err(GenError::InvalidRuntime(_))
+            Err(GenError::InvalidEndpoint(_))
         ));
     }
+    let no_self = Runtime {
+        self_exe_paths: vec![],
+        ..runtime()
+    };
+    assert!(matches!(
+        generate_tun(&p, &nodes(), &[], &no_self),
+        Err(GenError::InvalidRuntime(_))
+    ));
 }
 
 #[test]
@@ -430,6 +435,176 @@ fn invalid_rules_report_their_location() {
         generate(&p),
         Err(GenError::InvalidRule { location, .. }) if location == "groups[0].match[1]"
     ));
+}
+
+fn socks() -> SocksInbound {
+    SocksInbound {
+        port: 59124,
+        password: Secret::new("SocksPassword0123456789abcdefXYZ".into()),
+    }
+}
+
+fn precise_profile() -> Profile {
+    Profile {
+        mode: Mode::Precise,
+        ..sample_profile()
+    }
+}
+
+fn generate_precise_json(p: &Profile) -> Result<Value, GenError> {
+    let text = generate_precise(p, &nodes(), &[hk_auto(), manual()], &runtime(), &socks())?;
+    Ok(serde_json::from_str(text.expose()).unwrap())
+}
+
+#[test]
+fn precise_routes_each_group_by_its_socks_user() {
+    let v = generate_precise_json(&precise_profile()).unwrap();
+    let inbound = &v["inbounds"][0];
+    assert_eq!(
+        v["inbounds"].as_array().unwrap().len(),
+        1,
+        "no TUN in precise mode"
+    );
+    assert_eq!(inbound["type"], "socks");
+    assert_eq!(inbound["tag"], SOCKS_INBOUND_TAG);
+    assert_eq!(inbound["listen"], "127.0.0.1", "loopback only (C-NET-08)");
+    assert_eq!(inbound["listen_port"], 59124);
+    // 用户名是进程组标签，与中继的 SOCKS5 握手一致
+    let users: Vec<&str> = inbound["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, ["game", "browser", "chat"]);
+    assert!(
+        inbound["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|u| u["password"] == socks().password.expose().as_str())
+    );
+
+    let rules = v["route"]["rules"].as_array().unwrap();
+    assert_eq!(
+        rules[0],
+        serde_json::json!({ "inbound": [SOCKS_INBOUND_TAG], "action": "sniff" })
+    );
+    for (user, outbound) in [
+        ("game", "hk-auto"),
+        ("browser", "manual"),
+        ("chat", "ss2022"),
+    ] {
+        assert!(
+            rules
+                .iter()
+                .any(|r| r["auth_user"] == serde_json::json!([user])
+                    && r["action"] == "route"
+                    && r["outbound"] == outbound),
+            "{user} -> {outbound}: {rules:?}"
+        );
+    }
+    // 最后一条：入口上没有匹配进程组的连接一律拒绝，不直连（C-NET-03）
+    assert_eq!(
+        rules.last().unwrap(),
+        &serde_json::json!({ "inbound": [SOCKS_INBOUND_TAG], "action": "reject" })
+    );
+    assert!(
+        rules.iter().all(|r| r.get("process_path_regex").is_none()),
+        "process rules are the intercept layer's job in precise mode"
+    );
+    // 只输出被引用的出站
+    let mut tags = outbound_tags(&v);
+    tags.sort_unstable();
+    let mut expected = vec![
+        "direct",
+        "hk-auto",
+        "vless-reality",
+        "hy2",
+        "manual",
+        "trojan",
+        "anytls",
+        "ss2022",
+    ];
+    expected.sort_unstable();
+    assert_eq!(tags, expected);
+    assert_eq!(
+        v["experimental"]["clash_api"]["external_controller"],
+        "127.0.0.1:59123"
+    );
+}
+
+#[test]
+fn precise_blocks_quic_on_the_entry_when_asked() {
+    let mut p = precise_profile();
+    p.udp.block_quic = true;
+    let v = generate_precise_json(&p).unwrap();
+    let rules = v["route"]["rules"].as_array().unwrap();
+    let quic = rules
+        .iter()
+        .position(|r| r["port"] == 443 && r["network"] == "udp")
+        .expect("QUIC rule");
+    assert_eq!(rules[quic]["action"], "reject");
+    let first_route = rules.iter().position(|r| r["action"] == "route").unwrap();
+    assert!(
+        quic < first_route,
+        "QUIC is rejected before any group routes it"
+    );
+}
+
+#[test]
+fn precise_and_tun_generators_reject_each_others_profiles() {
+    assert_eq!(
+        generate_precise_json(&sample_profile()).unwrap_err(),
+        GenError::UnsupportedMode
+    );
+    assert_eq!(
+        generate(&precise_profile()).unwrap_err(),
+        GenError::UnsupportedMode
+    );
+}
+
+#[test]
+fn precise_rejects_weak_socks_endpoints() {
+    let p = precise_profile();
+    for bad in [
+        SocksInbound { port: 0, ..socks() },
+        SocksInbound {
+            password: Secret::new("short".into()),
+            ..socks()
+        },
+        SocksInbound {
+            password: Secret::new("SocksPassword0123456789abcdefXY\"".into()),
+            ..socks()
+        },
+    ] {
+        assert_eq!(
+            generate_precise(&p, &nodes(), &[hk_auto(), manual()], &runtime(), &bad).unwrap_err(),
+            GenError::InvalidEndpoint("SOCKS 入口")
+        );
+    }
+}
+
+#[test]
+fn precise_matches_snapshot() {
+    let text = generate_precise(
+        &precise_profile(),
+        &nodes(),
+        &[hk_auto(), manual()],
+        &runtime(),
+        &socks(),
+    )
+    .unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(PRECISE_SNAPSHOT);
+    let actual = format!("{}\n", text.expose());
+    if std::env::var_os("PROCROUTE_UPDATE_SNAPSHOTS").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        actual == expected,
+        "生成结果与 {PRECISE_SNAPSHOT} 不一致；确认改动无误后用 PROCROUTE_UPDATE_SNAPSHOTS=1 重新生成"
+    );
 }
 
 /// 用锁定版本的 sing-box 执行 `check`（只构造实例、不启动：不建 TUN、不监听端口、不联网）。
@@ -504,6 +679,20 @@ mod sing_box_check {
     #[test]
     fn sample_profile_passes() {
         assert_accepted(&sample_profile(), &[hk_auto(), manual()], "sample");
+    }
+
+    #[test]
+    fn precise_sample_passes() {
+        let mut p = precise_profile();
+        p.udp.block_quic = true;
+        let text =
+            generate_precise(&p, &nodes(), &[hk_auto(), manual()], &runtime(), &socks()).unwrap();
+        let (ok, log) = check(text.expose(), "precise");
+        assert!(ok, "sing-box check 拒绝了精确模式配置：\n{log}");
+        assert!(
+            !log.to_ascii_lowercase().contains("deprecated"),
+            "精确模式配置用到了弃用字段：\n{log}"
+        );
     }
 
     #[test]

@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! 由方案生成 sing-box 1.14 配置：TUN 模式（T-055）。
+//! 由方案生成 sing-box 1.14 配置：TUN 模式（T-055）与精确进程模式（T-095）。
 //!
-//! 生成结果每次启动重建，写入运行目录，禁止手改（C-ARCH-05）；其中含节点凭据明文，因此以
+//! 生成结果每次启动重建，经标准输入交给 sing-box，禁止手改（C-ARCH-05）；其中含节点凭据明文，因此以
 //! [`Secret`] 返回。字段以锁定版本（1.14.4）为准，与旧版本配置的差异见 `third_party/sing-box/`。
+//!
+//! 精确进程模式下 sing-box 只有一个绑定回环的 SOCKS5 入口（C-NET-08），由本地中继把目标进程的连接
+//! 转进来：用户名是进程组标签，`auth_user` 规则把它路由到该组的出站；入口上没有匹配到任何进程组的
+//! 连接一律拒绝，绝不直连（C-NET-03）。入口上的连接都做协议嗅探，连接面板因此能显示域名。
+//! 1.14 已删除「用嗅探出的域名覆盖目标地址」（`sniff_override_destination`，规则动作里没有替代），
+//! 设计文档 6.3 的「让远端重新解析」需要另找做法（T-092，见 TASKS.md）。
 //!
 //! TUN 入站的几处取值有硬约束背景：
 //!
@@ -35,6 +41,8 @@ use crate::{outbound, process_regex};
 pub const DIRECT_TAG: &str = "direct";
 /// TUN 入站的标签。
 pub const TUN_INBOUND_TAG: &str = "tun-in";
+/// 精确进程模式的 SOCKS5 入站标签。
+pub const SOCKS_INBOUND_TAG: &str = "socks-in";
 /// 解析节点域名用的 DNS 服务器标签。
 pub const LOCAL_DNS_TAG: &str = "local";
 /// TUN 网卡名。
@@ -89,6 +97,14 @@ pub struct GroupOutbound {
     pub members: Vec<String>,
 }
 
+/// 精确进程模式的本地 SOCKS5 入口：只绑定 127.0.0.1，端口与密码每次启动随机生成（C-NET-08）。
+/// 所有进程组共用这个密码，用户名是进程组标签。
+#[derive(Debug, Clone)]
+pub struct SocksInbound {
+    pub port: u16,
+    pub password: Secret<String>,
+}
+
 /// 每次启动随机生成的运行参数。
 #[derive(Debug, Clone)]
 pub struct Runtime {
@@ -104,7 +120,7 @@ pub struct Runtime {
 pub enum GenError {
     #[error("方案未通过校验（{0} 处问题）")]
     InvalidProfile(usize),
-    #[error("这里只生成 TUN 模式的配置")]
+    #[error("方案的工作模式与要生成的配置不一致")]
     UnsupportedMode,
     #[error("方案没有任何进程组")]
     NoGroups,
@@ -136,6 +152,8 @@ pub enum GenError {
     },
     #[error("运行参数无效：{0}")]
     InvalidRuntime(&'static str),
+    #[error("{0}的端口为 0，或密钥过短、含非字母数字字符")]
+    InvalidEndpoint(&'static str),
 }
 
 /// 生成 TUN 模式的 sing-box 配置。只输出方案实际引用到的出站。
@@ -158,11 +176,8 @@ pub fn generate_tun(
     let rules = route_rules(profile, runtime)?;
 
     let config = json!({
-        "log": { "level": "warn", "timestamp": true },
-        "dns": {
-            "servers": [ { "type": "local", "tag": LOCAL_DNS_TAG } ],
-            "final": LOCAL_DNS_TAG,
-        },
+        "log": log_options(),
+        "dns": local_dns(),
         "inbounds": [ {
             "type": "tun",
             "tag": TUN_INBOUND_TAG,
@@ -181,32 +196,115 @@ pub fn generate_tun(
             "auto_detect_interface": true,
             "default_domain_resolver": LOCAL_DNS_TAG,
         },
-        "experimental": {
-            "clash_api": {
-                "external_controller": format!("127.0.0.1:{}", runtime.api_port),
-                "secret": runtime.api_secret.expose(),
-                // 控制 API 只给服务用；不放行任何网页来源
-                "access_control_allow_origin": ["http://127.0.0.1"],
-            },
-        },
+        "experimental": clash_api(runtime),
     });
     Ok(Secret::new(format!("{config:#}")))
 }
 
+/// 生成精确进程模式的 sing-box 配置：一个回环 SOCKS5 入口，按用户名（进程组标签）分流到各组出站。
+/// 只输出方案实际引用到的出站。
+pub fn generate_precise(
+    profile: &Profile,
+    nodes: &[NodeOutbound],
+    groups: &[GroupOutbound],
+    runtime: &Runtime,
+    socks: &SocksInbound,
+) -> Result<Secret<String>, GenError> {
+    procroute_config::validate::validate(profile)
+        .map_err(|issues| GenError::InvalidProfile(issues.len()))?;
+    if profile.mode != Mode::Precise {
+        return Err(GenError::UnsupportedMode);
+    }
+    if profile.groups.is_empty() {
+        return Err(GenError::NoGroups);
+    }
+    check_runtime(runtime)?;
+    check_secret(socks.port, socks.password.expose(), "SOCKS 入口")?;
+    let outbounds = outbounds(profile, nodes, groups)?;
+    let users: Vec<Value> = profile
+        .groups
+        .iter()
+        .map(|g| json!({ "username": g.tag, "password": socks.password.expose() }))
+        .collect();
+
+    let mut rules = vec![json!({ "inbound": [SOCKS_INBOUND_TAG], "action": "sniff" })];
+    if profile.udp.block_quic {
+        // 拦截层（T-093）已经丢弃目标进程的 UDP 443，这里再兜一层
+        rules.push(json!({
+            "inbound": [SOCKS_INBOUND_TAG], "network": "udp", "port": 443, "action": "reject",
+        }));
+    }
+    rules.extend(
+        profile
+            .groups
+            .iter()
+            .map(|g| json!({ "auth_user": [g.tag], "action": "route", "outbound": g.outbound })),
+    );
+    // 入口上的连接走到这里说明没有对应的进程组：拒绝，不直连（C-NET-03）
+    rules.push(json!({ "inbound": [SOCKS_INBOUND_TAG], "action": "reject" }));
+
+    let config = json!({
+        "log": log_options(),
+        "dns": local_dns(),
+        "inbounds": [ {
+            "type": "socks",
+            "tag": SOCKS_INBOUND_TAG,
+            "listen": "127.0.0.1",
+            "listen_port": socks.port,
+            "users": users,
+        } ],
+        "outbounds": outbounds,
+        "route": {
+            "rules": rules,
+            // 只有不经入口的流量会走到 final；精确模式下没有这种流量
+            "final": DIRECT_TAG,
+            "auto_detect_interface": true,
+            "default_domain_resolver": LOCAL_DNS_TAG,
+        },
+        "experimental": clash_api(runtime),
+    });
+    Ok(Secret::new(format!("{config:#}")))
+}
+
+fn log_options() -> Value {
+    json!({ "level": "warn", "timestamp": true })
+}
+
+fn local_dns() -> Value {
+    json!({
+        "servers": [ { "type": "local", "tag": LOCAL_DNS_TAG } ],
+        "final": LOCAL_DNS_TAG,
+    })
+}
+
+fn clash_api(runtime: &Runtime) -> Value {
+    json!({
+        "clash_api": {
+            "external_controller": format!("127.0.0.1:{}", runtime.api_port),
+            "secret": runtime.api_secret.expose(),
+            // 控制 API 只给服务用；不放行任何网页来源
+            "access_control_allow_origin": ["http://127.0.0.1"],
+        },
+    })
+}
+
 fn check_runtime(rt: &Runtime) -> Result<(), GenError> {
-    if rt.api_port == 0 {
-        return Err(GenError::InvalidRuntime("控制 API 端口不能为 0"));
-    }
-    let secret = rt.api_secret.expose();
-    if secret.len() < MIN_API_SECRET_LEN || !secret.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return Err(GenError::InvalidRuntime(
-            "控制 API 密钥过短或含非字母数字字符",
-        ));
-    }
+    check_secret(rt.api_port, rt.api_secret.expose(), "控制 API")?;
     if rt.self_exe_paths.is_empty() {
         return Err(GenError::InvalidRuntime(
             "缺少 ProcRoute 自身的可执行文件路径",
         ));
+    }
+    Ok(())
+}
+
+/// 回环入口的端口与密钥：端口非 0，密钥足够长且只含字母数字（C-NET-08）。
+fn check_secret(port: u16, secret: &str, what: &'static str) -> Result<(), GenError> {
+    if port == 0 {
+        return Err(GenError::InvalidEndpoint(what));
+    }
+    if secret.len() < MIN_API_SECRET_LEN || !secret.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(GenError::InvalidEndpoint(what));
     }
     Ok(())
 }
