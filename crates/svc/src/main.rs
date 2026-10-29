@@ -22,6 +22,8 @@ mod client_auth;
 #[cfg(windows)]
 mod conn_watch;
 #[cfg(windows)]
+mod diag;
+#[cfg(windows)]
 mod events;
 #[cfg(windows)]
 mod fail_closed;
@@ -72,6 +74,7 @@ mod windows_main {
     use tracing_subscriber::util::SubscriberInitExt;
 
     use crate::client_auth::ClientAuth;
+    use crate::diag::DiagSources;
     use crate::events::{STREAM_CAPACITY, StreamEvent};
     use crate::fail_closed::WfpGuard;
     use crate::handlers::Services;
@@ -155,19 +158,26 @@ mod windows_main {
         Ok(root)
     }
 
-    fn open_log_file(root: &Path) -> anyhow::Result<File> {
-        let dir = root.join("logs");
-        std::fs::create_dir_all(&dir)?;
+    fn log_file_path(root: &Path) -> PathBuf {
+        root.join("logs").join("svc.log")
+    }
+
+    fn open_log_file(path: &Path) -> anyhow::Result<File> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("svc.log"))
+            .open(path)
             .context("open svc.log")
     }
 
+    /// `log_file` 为服务日志（控制台模式下没有），写进诊断包。
     fn services(
         root: &Path,
         stream: broadcast::Sender<StreamEvent>,
+        log_file: Option<PathBuf>,
     ) -> anyhow::Result<Arc<Services>> {
         let profiles = ProfileStore::open(root.join("profiles")).context("open profile store")?;
         let nodes = NodeStore::open(root.join("nodes.json")).context("open node store")?;
@@ -185,14 +195,21 @@ mod windows_main {
                 .to_string_lossy()
                 .into_owned(),
         ];
-        Ok(Arc::new(Services::new(
-            profiles,
-            nodes,
-            stream,
-            Arc::new(launcher),
-            Arc::new(WfpGuard),
-            self_exe_paths,
-        )))
+        let diag = DiagSources {
+            log_file,
+            kernel_exe: Some(install_dir.join(KERNEL_FILE_NAME)),
+        };
+        Ok(Arc::new(
+            Services::new(
+                profiles,
+                nodes,
+                stream,
+                Arc::new(launcher),
+                Arc::new(WfpGuard),
+                self_exe_paths,
+            )
+            .with_diagnostics(diag),
+        ))
     }
 
     /// 运行管道服务端直到收到停止信号，然后停止会话。
@@ -227,7 +244,7 @@ mod windows_main {
     fn run_console(stream: broadcast::Sender<StreamEvent>) -> anyhow::Result<()> {
         let root = prepare_config_root()?;
         drop_privileges();
-        let services = services(&root, stream)?;
+        let services = services(&root, stream, None)?;
         let rt = tokio::runtime::Runtime::new().context("start tokio runtime")?;
         rt.block_on(async {
             let (tx, rx) = watch::channel(false);
@@ -260,9 +277,10 @@ mod windows_main {
     ) -> anyhow::Result<()> {
         let root = prepare_config_root()?;
         let stream = broadcast::channel(STREAM_CAPACITY).0;
-        init_logging(LogTarget::File(open_log_file(&root)?), stream.clone())?;
+        let log_file = log_file_path(&root);
+        init_logging(LogTarget::File(open_log_file(&log_file)?), stream.clone())?;
         drop_privileges();
-        let services = services(&root, stream)?;
+        let services = services(&root, stream, Some(log_file))?;
         let rt = tokio::runtime::Runtime::new().context("start tokio runtime")?;
         let (tx, rx) = watch::channel(false);
         // 控制请求来自分派器线程上的同步 channel，转交给异步侧。

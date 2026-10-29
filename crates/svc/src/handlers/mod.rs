@@ -2,7 +2,8 @@
 //! 各领域的 IPC 处理函数（T-058）。
 //!
 //! 已接上：`session.*`（TUN 模式，见 [`session`] 模块文档）、`profile.*`、
-//! `node.import`（分享链接与订阅）/ `node.list` / `node.test`（见 [`latency`]）、`process.list`。
+//! `node.import`（分享链接与订阅）/ `node.list` / `node.test`（见 [`latency`]）、`process.list`、
+//! `diag.export`（见 [`crate::diag`]）。
 //! `conn.subscribe` / `log.subscribe` 由管道服务端处理。
 //! 尚未接上、如实返回错误而不假装成功的：`driver.*`，随 M2 的拦截后端接入。
 
@@ -15,6 +16,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, broadcast};
 
+use crate::diag::DiagSources;
 use crate::events::{EventHub, StreamEvent, Subscription};
 use crate::fail_closed::FailClosedGuard;
 use crate::ipc_server::{Call, Handler};
@@ -22,6 +24,7 @@ use crate::kernel::KernelLauncher;
 use crate::node_store::NodeStore;
 use crate::store::{ProfileStore, StoreError};
 
+mod diag;
 mod latency;
 mod node;
 mod process;
@@ -44,6 +47,8 @@ pub struct Services {
     epoch: Arc<AtomicU64>,
     /// ProcRoute 自身的可执行文件，永久直连（C-NET-05）。
     self_exe_paths: Vec<String>,
+    /// 诊断包要读的日志与内核文件。
+    diag: DiagSources,
 }
 
 impl Services {
@@ -65,7 +70,14 @@ impl Services {
             kernel: Mutex::new(None),
             epoch: Arc::new(AtomicU64::new(0)),
             self_exe_paths,
+            diag: DiagSources::default(),
         }
+    }
+
+    /// 告诉诊断包日志文件与内核文件在哪里（默认都没有）。
+    pub fn with_diagnostics(mut self, sources: DiagSources) -> Self {
+        self.diag = sources;
+        self
     }
 
     /// 服务退出前停止会话。
@@ -94,6 +106,7 @@ impl Handler for Services {
             "node.list" => node::list(self, params).await,
             "node.test" => latency::test(self, params).await,
             "process.list" => process::list(self, params, call.caller).await,
+            "diag.export" => diag::export(self, params, call.caller).await,
             other => {
                 tracing::debug!(
                     method = other,

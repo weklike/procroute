@@ -740,5 +740,6 @@ async fn mutating_calls_are_audited_without_their_params() {
     );
 }
 
+mod diag;
 mod latency;
 mod nodes;
