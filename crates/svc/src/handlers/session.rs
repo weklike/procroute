@@ -4,11 +4,12 @@
 //! 目前只有 TUN 模式能真正启动：服务生成配置，经 [`KernelLauncher`] 启动 sing-box，
 //! 守护进程的状态变化实时写回会话状态并推给界面（C-UI-02）。
 //!
-//! 如实拒绝、不假装成功的情形：
-//! - 精确进程模式：拦截驱动后端（T-071 起）尚未接入，返回 `driver.not_loaded`；
-//! - TUN 模式 + `fail_policy = block`：sing-box 一退出（崩溃、重启间隙、超出重启上限），TUN 与路由
-//!   随之撤销，目标进程会回落直连，无法满足 C-NET-03，返回 `session.fail_closed_unsupported`。
-//!   要支持它，需要一个不依赖 sing-box 存活的阻断手段（见 TASKS.md）。
+//! TUN 模式 + `fail_policy = block`：sing-box 一退出，TUN 与路由随之撤销。启动内核之前先经
+//! [`FailClosedGuard`] 装好阻断（服务持有的动态 WFP 过滤器），内核不在时目标进程的连接被拒绝而不是直连
+//! （C-NET-03）；装不上就拒绝启动（`session.fail_closed_unsupported`），不在没有保护的情况下运行。
+//! 阻断在会话停止、内核停下之后才撤销。
+//!
+//! 如实拒绝、不假装成功的情形：精确进程模式（拦截后端 T-072 起尚未接入）返回 `driver.not_loaded`。
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -29,13 +30,15 @@ use serde_json::Value;
 use super::{Services, blocking, node, store_error, to_json};
 use crate::conn_watch::{Classifier, ConnWatch, POLL_INTERVAL};
 use crate::events::EventHub;
+use crate::fail_closed::{FailClosedGuard, GuardHandle};
 use crate::ipc_server::parse_params;
 use crate::kernel::{RunningKernel, StateCallback};
 
-/// 运行中的会话：内核，以及 TUN 模式下读取内核连接列表的轮询（连接面板）。
+/// 运行中的会话：内核、TUN 模式下读取内核连接列表的轮询（连接面板），以及 `block` 策略的阻断。
 pub(super) struct RunningSession {
     kernel: Box<dyn RunningKernel>,
     conn_watch: Option<ConnWatch>,
+    guard: Option<Box<dyn GuardHandle>>,
 }
 
 /// 服务刚启动时的状态：服务在运行，驱动与内核未启动（C-UI-02 要求如实显示）。
@@ -72,6 +75,11 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
     let profile = blocking(move || store.get(&profile_id).map_err(store_error)).await?;
     check_supported(&profile)?;
     let config = tun_config(svc, &profile).await?;
+    // 先装阻断再启动内核：从第一个包起就不会直连
+    let guard = match profile.fail_policy {
+        FailPolicy::Block => Some(install_guard(svc.guard.clone(), &profile).await?),
+        FailPolicy::Allow => None,
+    };
 
     let epoch = svc.epoch.fetch_add(1, Ordering::SeqCst) + 1;
     svc.hub.update_session(|s| *s = starting(&profile));
@@ -101,7 +109,11 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
                     None
                 }
             };
-            *slot = Some(RunningSession { kernel, conn_watch });
+            *slot = Some(RunningSession {
+                kernel,
+                conn_watch,
+                guard,
+            });
             let status = svc.hub.update_session(|s| {
                 s.state = SessionState::Running;
                 s.components.kernel = ComponentState::Active;
@@ -111,6 +123,7 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
         }
         Ok(Err(e)) => {
             svc.epoch.fetch_add(1, Ordering::SeqCst);
+            stop_guard(guard).await;
             svc.hub.update_session(|s| {
                 *s = initial_status();
                 s.components.kernel = ComponentState::Failed;
@@ -123,6 +136,7 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
         }
         Err(e) => {
             svc.epoch.fetch_add(1, Ordering::SeqCst);
+            stop_guard(guard).await;
             svc.hub.update_session(|s| *s = initial_status());
             Err(IpcError::new(
                 ErrorCode::Internal,
@@ -161,7 +175,7 @@ pub(super) async fn shutdown(svc: &Services) {
     }
 }
 
-/// 先停连接轮询（为剩余连接发「已关闭」），再停内核。
+/// 先停连接轮询（为剩余连接发「已关闭」），再停内核，最后撤销阻断。
 async fn stop_session(running: RunningSession) {
     if let Some(watch) = running.conn_watch {
         watch.stop().await;
@@ -170,20 +184,46 @@ async fn stop_session(running: RunningSession) {
     if let Err(e) = tokio::task::spawn_blocking(move || kernel.stop()).await {
         tracing::error!(error = %e, "stopping the kernel failed");
     }
+    stop_guard(running.guard).await;
+}
+
+async fn install_guard(
+    guard: Arc<dyn FailClosedGuard>,
+    profile: &Profile,
+) -> Result<Box<dyn GuardHandle>, IpcError> {
+    let profile = profile.clone();
+    match tokio::task::spawn_blocking(move || guard.install(&profile)).await {
+        Ok(Ok(handle)) => Ok(handle),
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "cannot install the fail-closed filters");
+            Err(IpcError::new(
+                ErrorCode::SessionFailClosedUnsupported,
+                format!("cannot install the fail-closed filters: {e}"),
+            ))
+        }
+        Err(e) => Err(IpcError::new(
+            ErrorCode::Internal,
+            format!("fail-closed installer failed: {e}"),
+        )),
+    }
+}
+
+async fn stop_guard(guard: Option<Box<dyn GuardHandle>>) {
+    if let Some(guard) = guard
+        && let Err(e) = tokio::task::spawn_blocking(move || guard.stop()).await
+    {
+        tracing::error!(error = %e, "removing the fail-closed filters failed");
+    }
 }
 
 /// 拒绝当前还不能安全运行的组合（见模块文档）。
 fn check_supported(profile: &Profile) -> Result<(), IpcError> {
-    match (profile.mode, profile.fail_policy) {
-        (Mode::Precise, _) => Err(IpcError::new(
+    match profile.mode {
+        Mode::Precise => Err(IpcError::new(
             ErrorCode::DriverNotLoaded,
             "precise mode needs the interception driver, which is not available in this build yet",
         )),
-        (Mode::Tun, FailPolicy::Block) => Err(IpcError::new(
-            ErrorCode::SessionFailClosedUnsupported,
-            "TUN mode cannot keep target processes blocked while sing-box is down",
-        )),
-        (Mode::Tun, FailPolicy::Allow) => Ok(()),
+        Mode::Tun => Ok(()),
     }
 }
 

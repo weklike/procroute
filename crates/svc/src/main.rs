@@ -24,6 +24,8 @@ mod conn_watch;
 #[cfg(windows)]
 mod events;
 #[cfg(windows)]
+mod fail_closed;
+#[cfg(windows)]
 mod handlers;
 #[cfg(windows)]
 mod ipc_server;
@@ -71,6 +73,7 @@ mod windows_main {
 
     use crate::client_auth::ClientAuth;
     use crate::events::{STREAM_CAPACITY, StreamEvent};
+    use crate::fail_closed::WfpGuard;
     use crate::handlers::Services;
     use crate::ipc_server::{ServerConfig, serve};
     use crate::kernel::SupervisedKernel;
@@ -187,6 +190,7 @@ mod windows_main {
             nodes,
             stream,
             Arc::new(launcher),
+            Arc::new(WfpGuard),
             self_exe_paths,
         )))
     }

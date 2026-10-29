@@ -17,6 +17,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::events::{EventHub, StreamEvent, Subscription};
+use crate::fail_closed::FailClosedGuard;
 use crate::ipc_server::{Call, Handler};
 use crate::kernel::KernelLauncher;
 use crate::node_store::NodeStore;
@@ -35,6 +36,8 @@ pub struct Services {
     /// 会话状态与推送事件；会话状态只存在这里。
     hub: Arc<EventHub>,
     launcher: Arc<dyn KernelLauncher>,
+    /// TUN 模式 `block` 策略的阻断（C-NET-03）。
+    guard: Arc<dyn FailClosedGuard>,
     /// 运行中的内核。启动与停止都持有这把锁，彼此互斥。
     kernel: Mutex<Option<session::RunningSession>>,
     /// 当前会话的编号；旧会话的内核回调发现编号变了就不再改写状态。
@@ -50,6 +53,7 @@ impl Services {
         nodes: NodeStore,
         stream: broadcast::Sender<StreamEvent>,
         launcher: Arc<dyn KernelLauncher>,
+        guard: Arc<dyn FailClosedGuard>,
         self_exe_paths: Vec<String>,
     ) -> Self {
         Self {
@@ -57,6 +61,7 @@ impl Services {
             nodes,
             hub: Arc::new(EventHub::with_stream(session::initial_status(), stream)),
             launcher,
+            guard,
             kernel: Mutex::new(None),
             epoch: Arc::new(AtomicU64::new(0)),
             self_exe_paths,

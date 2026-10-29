@@ -28,8 +28,8 @@ pub enum ErrorCode {
     SessionAlreadyRunning,
     #[serde(rename = "session.not_running")]
     SessionNotRunning,
-    /// 当前模式无法保证 `fail_policy = block`：例如 TUN 模式下 sing-box 一退出，TUN 与路由随之撤销，
-    /// 目标进程会回落直连（C-NET-03）。用户可以改用 `allow` 或精确进程模式。
+    /// 无法保证 `fail_policy = block`，因此没有启动会话：例如 TUN 模式需要的阻断过滤器装不上（C-NET-03）。
+    /// 用户可以改用 `allow`，或排查后重试。
     #[serde(rename = "session.fail_closed_unsupported")]
     SessionFailClosedUnsupported,
     #[serde(rename = "profile.not_found")]

@@ -38,7 +38,7 @@ const enUS: Messages = {
       already_running: 'A session is already running',
       not_running: 'No session is running',
       fail_closed_unsupported:
-        'TUN mode cannot block the target processes once the kernel exits, so the "Block" failure policy is not supported there yet; switch the profile to "Allow" or use precise mode',
+        'The filters the "Block" failure policy needs could not be installed, so the session was not started to keep target processes from going direct; switch to "Allow" or check the logs and retry',
     },
     profile: {
       not_found: 'Profile not found',

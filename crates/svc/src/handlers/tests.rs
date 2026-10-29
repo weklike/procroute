@@ -20,6 +20,7 @@ use tokio::sync::watch;
 
 use super::*;
 use crate::client_auth::ClientAuth;
+use crate::fail_closed::{FailClosedGuard, GuardHandle};
 use crate::ipc_server::{Caller, ServerConfig, serve};
 use crate::kernel::{RunningKernel, StateCallback};
 use crate::node_store::NodeStore;
@@ -84,9 +85,43 @@ impl RunningKernel for FakeKernel {
     }
 }
 
+/// 假的阻断：记录安装过的方案与撤销次数；`fail` 时安装失败。
+#[derive(Default)]
+struct FakeGuard {
+    fail: bool,
+    installed: Mutex<Vec<String>>,
+    removed: Arc<AtomicUsize>,
+}
+
+impl FailClosedGuard for FakeGuard {
+    fn install(&self, profile: &Profile) -> Result<Box<dyn GuardHandle>, String> {
+        if self.fail {
+            return Err("access denied".into());
+        }
+        self.installed
+            .lock()
+            .expect("installed")
+            .push(profile.id.clone());
+        Ok(Box::new(FakeGuardHandle {
+            removed: self.removed.clone(),
+        }))
+    }
+}
+
+struct FakeGuardHandle {
+    removed: Arc<AtomicUsize>,
+}
+
+impl GuardHandle for FakeGuardHandle {
+    fn stop(self: Box<Self>) {
+        self.removed.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 struct Fixture {
     services: Services,
     launcher: Arc<FakeLauncher>,
+    guard: Arc<FakeGuard>,
     dir: PathBuf,
     caller: Caller,
 }
@@ -102,12 +137,18 @@ fn fixture(tag: &str) -> Fixture {
 }
 
 fn fixture_with(tag: &str, launcher: FakeLauncher) -> Fixture {
+    fixture_with_guard(tag, launcher, FakeGuard::default())
+}
+
+fn fixture_with_guard(tag: &str, launcher: FakeLauncher, guard: FakeGuard) -> Fixture {
     let dir = std::env::temp_dir().join(format!("procroute-handlers-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let launcher = Arc::new(launcher);
+    let guard = Arc::new(guard);
     Fixture {
-        services: services_with(&dir, launcher.clone()),
+        services: services_with(&dir, launcher.clone(), guard.clone()),
         launcher,
+        guard,
         dir,
         caller: Caller {
             // 用测试进程自己：`process.list` 要按调用者的会话过滤
@@ -120,15 +161,24 @@ fn fixture_with(tag: &str, launcher: FakeLauncher) -> Fixture {
 
 /// 方案目录与节点文件分开放，和正式布局一致（`profiles\` 与 `nodes.json`）。
 fn services(dir: &std::path::Path) -> Services {
-    services_with(dir, Arc::new(FakeLauncher::default()))
+    services_with(
+        dir,
+        Arc::new(FakeLauncher::default()),
+        Arc::new(FakeGuard::default()),
+    )
 }
 
-fn services_with(dir: &std::path::Path, launcher: Arc<FakeLauncher>) -> Services {
+fn services_with(
+    dir: &std::path::Path,
+    launcher: Arc<FakeLauncher>,
+    guard: Arc<FakeGuard>,
+) -> Services {
     Services::new(
         ProfileStore::open(dir).expect("store"),
         NodeStore::open(dir.join("node-store").join("nodes.json")).expect("node store"),
         tokio::sync::broadcast::channel(16).0,
         launcher,
+        guard,
         vec![
             r"C:\Program Files\ProcRoute\procroute-svc.exe".into(),
             r"C:\Program Files\ProcRoute\procroute-ui.exe".into(),
@@ -275,17 +325,6 @@ async fn session_reports_truthfully_and_refuses_what_it_cannot_do_safely() {
         code(f.call("session.start", json!({ "profile_id": "p1" })).await),
         ErrorCode::DriverNotLoaded
     );
-    // TUN + 阻断：内核退出时无法阻断目标进程（C-NET-03）
-    let mut tun_block = sample("p2", "y");
-    tun_block.mode = Mode::Tun;
-    tun_block.fail_policy = FailPolicy::Block;
-    f.call("profile.save", to_json(&tun_block).expect("json"))
-        .await
-        .expect("save");
-    assert_eq!(
-        code(f.call("session.start", json!({ "profile_id": "p2" })).await),
-        ErrorCode::SessionFailClosedUnsupported
-    );
     assert_eq!(f.launcher.launch_count(), 0, "nothing was launched");
     let after = f.services.session_snapshot();
     assert_eq!(after.state, SessionState::Stopped);
@@ -294,6 +333,11 @@ async fn session_reports_truthfully_and_refuses_what_it_cannot_do_safely() {
 
 /// 导入一个节点，保存一个引用它的 TUN + 放行方案，返回方案 id。
 async fn tun_allow_profile(f: &Fixture) -> String {
+    tun_profile(f, FailPolicy::Allow).await
+}
+
+/// 导入一个节点，保存一个引用它的 TUN 方案，返回方案 id。
+async fn tun_profile(f: &Fixture, policy: FailPolicy) -> String {
     f.call(
         "node.import",
         json!({ "kind": "share_links", "text": TROJAN }),
@@ -304,7 +348,7 @@ async fn tun_allow_profile(f: &Fixture) -> String {
     let node_id = list["nodes"][0]["id"].as_str().expect("node id").to_owned();
     let mut p = sample("tun1", "TUN 方案");
     p.mode = Mode::Tun;
-    p.fail_policy = FailPolicy::Allow;
+    p.fail_policy = policy;
     p.groups[0].outbound = node_id;
     f.call("profile.save", to_json(&p).expect("json"))
         .await
@@ -356,6 +400,10 @@ async fn tun_session_starts_with_a_generated_config_and_stops() {
     let list = f.call("profile.list", json!({})).await.expect("list");
     assert_eq!(list["profiles"][0]["active"], true);
 
+    assert!(
+        f.guard.installed.lock().expect("installed").is_empty(),
+        "allow sessions install no filters"
+    );
     let stopped = f.call("session.stop", json!({})).await.expect("stop");
     assert_eq!(stopped["state"], "stopped");
     assert_eq!(stopped["components"]["kernel"], "inactive");
@@ -403,6 +451,70 @@ async fn kernel_reports_drive_the_session_and_stale_ones_are_ignored() {
     f.call("session.stop", json!({})).await.expect("stop");
     f.launcher.report(1, KernelState::Restarting { attempt: 1 });
     assert_eq!(f.services.session_snapshot(), session::initial_status());
+}
+
+#[tokio::test]
+async fn tun_block_sessions_run_behind_the_fail_closed_guard() {
+    let f = fixture("tun-block");
+    let id = tun_profile(&f, FailPolicy::Block).await;
+    let status = f
+        .call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect("start");
+    assert_eq!(status["state"], "running");
+    assert_eq!(
+        f.guard.installed.lock().expect("installed").as_slice(),
+        std::slice::from_ref(&id)
+    );
+    assert_eq!(f.launcher.launch_count(), 1);
+
+    // 超出重启上限：进入阻断状态，过滤器保留（目标进程连不上，而不是直连）
+    f.launcher
+        .report(0, KernelState::Stopped(StopReason::CrashLoop));
+    let s = f.services.session_snapshot();
+    assert_eq!(s.state, SessionState::Blocked);
+    assert_eq!(f.guard.removed.load(Ordering::SeqCst), 0);
+
+    // 停止会话才撤销
+    f.call("session.stop", json!({})).await.expect("stop");
+    assert_eq!(f.guard.removed.load(Ordering::SeqCst), 1);
+    assert_eq!(f.launcher.stopped.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn tun_block_refuses_to_start_without_the_guard() {
+    let f = fixture_with_guard(
+        "tun-block-no-guard",
+        FakeLauncher::default(),
+        FakeGuard {
+            fail: true,
+            ..FakeGuard::default()
+        },
+    );
+    let id = tun_profile(&f, FailPolicy::Block).await;
+    let err = f
+        .call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect_err("refused");
+    assert_eq!(err.code, ErrorCode::SessionFailClosedUnsupported);
+    assert_eq!(f.launcher.launch_count(), 0, "no kernel without the guard");
+    assert_eq!(f.services.session_snapshot().state, SessionState::Stopped);
+}
+
+#[tokio::test]
+async fn failed_launch_removes_the_guard_again() {
+    let f = fixture_with_guard(
+        "tun-block-launch-fails",
+        FakeLauncher::failing(),
+        FakeGuard::default(),
+    );
+    let id = tun_profile(&f, FailPolicy::Block).await;
+    assert_eq!(
+        code(f.call("session.start", json!({ "profile_id": id })).await),
+        ErrorCode::KernelUnavailable
+    );
+    assert_eq!(f.guard.installed.lock().expect("installed").len(), 1);
+    assert_eq!(f.guard.removed.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

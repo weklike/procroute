@@ -36,7 +36,7 @@ const zhCN = {
       already_running: '会话已在运行',
       not_running: '会话没有在运行',
       fail_closed_unsupported:
-        'TUN 模式下内核退出后无法阻断目标进程，暂不支持「阻断」失败策略；请在方案中改为「放行」或使用精确进程模式',
+        '无法安装「阻断」策略需要的过滤规则，为避免目标进程直连，会话没有启动；可以改为「放行」或查看日志后重试',
     },
     profile: {
       not_found: '方案不存在',
