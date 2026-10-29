@@ -43,7 +43,7 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-058（T-058 余下 `node.test`，见下）、T-060 ~ T-062 | 在虚拟机里验证 TUN + `block` 的 WFP 阻断（`procroute-platform-win --features vm-tests`）；`node.test` |
+| M1 | T-050 ~ T-058、T-060 ~ T-062 | 在虚拟机里验证 TUN + `block` 的 WFP 阻断（`procroute-platform-win --features vm-tests`） |
 | M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074 | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
 | M3 | T-090、T-092（中继嗅探 + 远程 DNS，见下）、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-095 的接线随 T-078 |
 | M4 | T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
@@ -70,8 +70,8 @@
   开发构建可开 `insecure-skip-client-auth` 特性跳过客户端校验，release 构建开启会编译失败（C-SEC-02）。
 - T-058：`profile.*`、`session.*`、`node.import`（分享链接）/ `node.list`、`process.list`、配置目录 ACL
   （`platform-win::dir_acl`，C-SEC-05）、服务模式日志 `logs\svc.log`。`process.list` 只列与调用者同一 Windows
-  会话的进程（服务能看到所有用户的进程），并标出命中运行中会话方案的进程组。`node.test` 仍返回 `kernel.unavailable`；订阅导入返回 `node.import_failed`；
-  其他未接入的方法返回 `internal.error`，不假装成功。日志暂无轮转。
+  会话的进程（服务能看到所有用户的进程），并标出命中运行中会话方案的进程组。`node.test` 见下面的测速一条；
+  未接入的方法（`driver.*`）返回 `internal.error`，不假装成功。日志暂无轮转。
   - `session.start` 目前只能启动 TUN 模式且 `fail_policy = allow`：精确进程模式返回 `driver.not_loaded`（等 T-071 起的
     拦截后端）；TUN + `block` 返回新增的 `session.fail_closed_unsupported`（见下面 T-055 的 C-NET-03 一条）。
     内核状态（重启中、恢复、超出重启上限）实时写回会话：`block` 进入 `blocked`，`allow` 结束会话、内核显示失败。
@@ -98,6 +98,12 @@
     库），只由用户操作触发（C-SEC-08），上限 10 MB（C-SEC-07）。再次导入同一地址即刷新：内容没变的节点保留原 id。
     订阅地址可能含令牌，加密落盘，只有 `scheme://host` 出现在日志、错误与界面里（C-SEC-04）。`nodes.json` 升到
     格式 2（读到格式 1 视为没有订阅，下次写入即升级）。Clash / mihomo YAML 订阅仍不支持（需要 YAML 库，未定）。
+  - 测速 `node.test`：`NodeTestParams` 新增可选的 `url`（新增可选字段，协议版本不变）。测速地址由用户在设置里填写，
+    保存在界面偏好中，不内置任何地址，留空即不能测速（C-SEC-08、C-SEC-09）。服务每次调用临时启动一个**没有入站**的
+    sing-box（`config_gen::generate_probe`：只有直连与节点出站和控制 API，不建 TUN、不监听代理端口），经控制 API 的
+    `/proxies/{tag}/delay` 测速，16 个并行、单个 5 秒，测完即停；一次最多 64 个节点，界面分批调用，保证每次调用在
+    60 秒调用超时之内。**只接受 `https://`**：锁定的 sing-box 1.14.4 在这个接口上会把 `http://` 开头的地址悄悄换成
+    内置的默认测速地址（实测），既不是用户选的地址也违反 C-SEC-09；服务、`clash_api::fetch_delay` 与界面三处都拒绝。
 - T-056：sing-box 的配置经标准输入（`-c stdin`）交给内核，不写进 `run\` 目录：配置里有节点凭据明文，落盘会违反
   C-SEC-04（优先于设计文档第 8 节的「写在 run\ 目录」）；`run\` 只作为 sing-box 的工作目录。版本锁在编译时嵌入
   （`core-mgr::kernel_lock`），每次（重新）启动前校验安装目录里的 `sing-box.exe`，校验到进程创建完成之间以只读共享
