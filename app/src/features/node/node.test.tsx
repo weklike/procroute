@@ -29,7 +29,10 @@ describe('ImportLinksDialog', () => {
     const importSpy = vi.fn(() => ({
       added: 1,
       skipped: 1,
-      issues: [{ line: 2, reason: 'unsupported scheme' }],
+      issues: [
+        { line: 2, reason: 'unsupported_protocol' },
+        { line: 0, reason: 'some_future_code' },
+      ],
     }))
     mockCall(call, {
       'node.import': importSpy,
@@ -51,7 +54,9 @@ describe('ImportLinksDialog', () => {
     expect(box).toHaveValue('')
     const status = await within(dialog).findByRole('status')
     expect(status).toHaveTextContent('新增 1 个，跳过 1 个')
-    expect(status).toHaveTextContent('第 2 行')
+    // 原因代码按 i18n 翻译；整段输入的问题没有行号；未知代码原样显示
+    expect(within(status).getByText('第 2 行：不支持的协议')).toBeInTheDocument()
+    expect(within(status).getByText('some_future_code')).toBeInTheDocument()
     expect(dialog).not.toHaveTextContent('secret-password')
   })
 

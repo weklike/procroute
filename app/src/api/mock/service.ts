@@ -173,8 +173,8 @@ export function createMockService(): MockService {
       const protocol = SCHEMES[scheme]
       if (!protocol) {
         result.skipped += 1
-        // 原因里不回显链接内容（C-SEC-04）
-        result.issues.push({ line: i + 1, reason: 'unsupported or malformed link' })
+        // 与服务一样只给原因代码，不回显链接内容（C-SEC-04）
+        result.issues.push({ line: i + 1, reason: scheme ? 'unsupported_protocol' : 'malformed' })
         return
       }
       const fragment = line.includes('#') ? line.slice(line.lastIndexOf('#') + 1) : ''

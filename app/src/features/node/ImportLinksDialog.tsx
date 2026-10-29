@@ -23,6 +23,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { errorText } from '@/lib/errors'
 
 import { useImportNodes } from './api'
+import { importIssueText } from './issues'
 
 const schema = z.object({ text: z.string().trim().min(1, 'node.import.required') })
 type Values = z.infer<typeof schema>
@@ -92,7 +93,7 @@ export default function ImportLinksDialog() {
               </span>
               <ul className="text-muted-foreground">
                 {result.issues.map((i) => (
-                  <li key={i.line}>{t('node.import.issue', { line: i.line, reason: i.reason })}</li>
+                  <li key={`${i.line}:${i.reason}`}>{importIssueText(t, i)}</li>
                 ))}
               </ul>
             </div>
