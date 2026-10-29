@@ -2,10 +2,10 @@
 //! 各领域的 IPC 处理函数（T-058）。
 //!
 //! 已接上：`session.*`（TUN 模式，见 [`session`] 模块文档）、`profile.*`、
-//! `node.import`（分享链接）/ `node.list`。`conn.subscribe` / `log.subscribe` 由管道服务端处理。
+//! `node.import`（分享链接）/ `node.list`、`process.list`。`conn.subscribe` / `log.subscribe` 由管道服务端处理。
 //! 尚未接上、如实返回错误而不假装成功的：
 //! - `node.import` 的订阅拉取与 `node.test`：见 [`node`] 模块文档；
-//! - `process.list`、`driver.*`：随 M2 的各模块接入。
+//! - `driver.*`：随 M2 的拦截后端接入。
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -23,6 +23,7 @@ use crate::node_store::NodeStore;
 use crate::store::{ProfileStore, StoreError};
 
 mod node;
+mod process;
 mod profile;
 mod session;
 
@@ -86,6 +87,7 @@ impl Handler for Services {
             "node.import" => node::import(self, params).await,
             "node.list" => node::list(self, params).await,
             "node.test" => node::test(self, params),
+            "process.list" => process::list(self, params, call.caller).await,
             other => {
                 tracing::debug!(
                     method = other,

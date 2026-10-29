@@ -110,7 +110,8 @@ fn fixture_with(tag: &str, launcher: FakeLauncher) -> Fixture {
         launcher,
         dir,
         caller: Caller {
-            pid: 1234,
+            // 用测试进程自己：`process.list` 要按调用者的会话过滤
+            pid: std::process::id(),
             image: r"C:\Program Files\ProcRoute\procroute-ui.exe".into(),
             sid: "S-1-5-21-1-2-3-1001".into(),
         },
@@ -453,9 +454,75 @@ async fn params_are_schema_checked() {
 }
 
 #[tokio::test]
+async fn process_list_shows_this_session_and_marks_matches() {
+    let f = fixture("processes");
+    let me = std::process::id();
+    let exe = std::env::current_exe().expect("current exe");
+    let file = exe
+        .file_name()
+        .expect("file name")
+        .to_string_lossy()
+        .into_owned();
+
+    let find = |list: &Value| {
+        list["processes"]
+            .as_array()
+            .expect("processes")
+            .iter()
+            .find(|p| p["pid"] == me)
+            .cloned()
+            .expect("the test process is listed")
+    };
+    let list = f.call("process.list", json!({})).await.expect("list");
+    let entry = find(&list);
+    assert!(
+        entry["name"]
+            .as_str()
+            .expect("name")
+            .eq_ignore_ascii_case(&file)
+    );
+    assert!(
+        entry["path"]
+            .as_str()
+            .expect("path")
+            .eq_ignore_ascii_case(&exe.to_string_lossy())
+    );
+    assert_eq!(
+        entry["matched_group"],
+        Value::Null,
+        "no session, no matches"
+    );
+
+    // 运行一个按名称命中测试进程的 TUN 会话
+    f.call(
+        "node.import",
+        json!({ "kind": "share_links", "text": TROJAN }),
+    )
+    .await
+    .expect("import");
+    let nodes = f.call("node.list", json!({})).await.expect("nodes");
+    let mut p = sample("self", "self");
+    p.mode = Mode::Tun;
+    p.fail_policy = FailPolicy::Allow;
+    p.groups[0].outbound = nodes["nodes"][0]["id"].as_str().expect("id").to_owned();
+    p.groups[0].matchers[0].value = file.clone();
+    f.call("profile.save", to_json(&p).expect("json"))
+        .await
+        .expect("save");
+    f.call("session.start", json!({ "profile_id": "self" }))
+        .await
+        .expect("start");
+    let list = f.call("process.list", json!({})).await.expect("list");
+    assert_eq!(find(&list)["matched_group"], "game");
+    // 命中的排在最前
+    assert_ne!(list["processes"][0]["matched_group"], Value::Null);
+    f.call("session.stop", json!({})).await.expect("stop");
+}
+
+#[tokio::test]
 async fn unwired_methods_fail_explicitly() {
     let f = fixture("unwired");
-    for m in ["process.list", "driver.status"] {
+    for m in ["driver.status"] {
         assert_eq!(code(f.call(m, json!({})).await), ErrorCode::Internal, "{m}");
     }
     assert_eq!(
