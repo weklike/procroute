@@ -43,8 +43,8 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-058、T-060 ~ T-062 | 在虚拟机里验证 TUN + `block` 的 WFP 阻断（`procroute-platform-win --features vm-tests`） |
-| M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074、T-079 | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
+| M1 | T-050 ~ T-058、T-060 ~ T-062；TUN + `block` 的 WFP 阻断已在沙盒中验证 | 在虚拟机里以服务方式跑一次 TUN 会话（收窄令牌后的 wintun 与 ETW，见下） |
+| M2 | T-070、T-071（驱动测试已在沙盒中通过）、T-073、T-074、T-079 | T-072 / T-075（改道到回环中继的方式用 `cargo xtask sandbox-test` 试） |
 | M3 | T-090、T-092（中继嗅探 + 远程 DNS，见下）、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-095 的接线随 T-078 |
 | M4 | T-112、T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
 
@@ -113,8 +113,8 @@
   目录按完整路径加载 `WinDivert.dll`，加载前校验 DLL 与驱动的 SHA-256，驱动文件在使用期间以只读共享方式锁定，不能被
   删除或替换（C-DRV-01、C-DRV-02）。打开句柄会加载驱动，相关测试在 `crates/intercept/tests/divert_vm.rs`，只在
   `--features vm-tests` 时编译，必须在虚拟机里以管理员身份运行（C-TEST-04）；开发机上只测 DLL 加载与过滤器语法。
-  **待验证**：`WINDIVERT_ADDRESS` 里地址数组的字序（按 WinDivert 的 `ntoh` 助手推断为 `[0]` 最低位），由
-  `socket_layer_reports_this_process_connects` 在虚拟机里确认。
+  `WINDIVERT_ADDRESS` 里地址数组的字序（按 WinDivert 的 `ntoh` 助手推断为 `[0]` 最低位）已由
+  `socket_layer_reports_this_process_connects` 在 Windows Sandbox 中确认（2026-10-29）。
 - 桌面客户端（`app/src-tauri`，包名 `procroute-ui`）：只依赖 proto；一条长连接、断线每 2 秒重连并重放订阅。
   外壳自己的事件 `shell:connection`（与服务的连接变化，界面据此清空服务端数据，C-UI-02）与 `shell:tray`（托盘点击）
   不属于 IPC 协议，类型写在 `app/src/api/shell.ts`。托盘菜单由前端生成并下发（文案走 i18n，C-UI-04），外壳只处理
@@ -139,6 +139,12 @@
   2. 远程 DNS（方案 schema 2 的 `dns.remote_server`）：用户填写 udp / tcp / tls / https 服务器，目标进程直发的
      53 端口查询被劫持到内核，经该进程组的出站解析（每个出站一个服务器，`detour`）；TUN 按进程、精确模式按 SOCKS
      用户匹配。不内置任何服务器地址（C-SEC-09）。精确模式下把目标进程的 UDP 53 交给中继，随 T-091 接入。
+- 虚拟机专属测试（2026-10-29 定用 Windows Sandbox 作为 C-TEST-04 的虚拟机）：`cargo xtask sandbox-test` 在开发机上
+  用静态 CRT 编译 `wfp_vm`、`etw_admin`、`watcher_admin`、`divert_vm`（沙盒里没有 VC++ 运行库，输出在独立的
+  `target/sandbox/build`），连同锁定的 WinDivert 文件只读映射进沙盒，由 `xtask/sandbox/run.ps1` 复制到沙盒本地
+  磁盘后逐个运行，结果写回 `target/sandbox/out` 后沙盒自动关机。沙盒启用默认 NAT 网络（WFP 测试要区分「被过滤器
+  拒绝」与「没有路由」）。登录命令不是管理员时整次运行判为失败。2026-10-29 首次运行 4 个文件 6 个测试全部通过。
+  以服务方式运行的联调（`cargo xtask dev`、收窄令牌后的 TUN）还没有放进沙盒。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
 - sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的
   `curl.exe` / `tar.exe` 拉取，SHA256 用 Windows CNG（`platform-win::hash`，T-056 校验 sing-box 时复用），
@@ -159,7 +165,7 @@
     正则规则由进程追踪（T-079）跟进：启动时快照一遍，之后靠 ETW 进程事件（约 100 ms），ETW 不可用时每 500 ms
     快照一次。**已知窗口**：内核不在、命中进程刚启动而事件还没送到的这段时间没有保护。只保护自身命中规则的可执行
     文件（TUN 模式下继承不生效）。过滤器装不上则不启动会话（`session.fail_closed_unsupported`）。
-    **待验证**：`crates/platform-win/tests/wfp_vm.rs` 在虚拟机里以管理员身份运行。
+    `crates/platform-win/tests/wfp_vm.rs` 已在 Windows Sandbox 中以管理员身份通过（2026-10-29）。
 - T-079：`procroute-procwatch`（新 crate）。`tree` 是跨平台的进程树：键为「PID + 创建时间」，同一 PID 出现更晚的
   创建时间即按旧进程退出处理，更早的视为过时事件；判定用 `rules::inherit::decide_child`；目标集合的变化以
   `Change::{Targeted, Released}` 交出（`inherited` 标出继承来的子进程），换方案时按创建时间顺序重判、只报变化。
