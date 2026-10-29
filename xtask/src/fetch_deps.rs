@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `cargo xtask fetch-deps`
 //!
-//! 按 `third_party/sing-box/lock.json` 拉取 sing-box 发布包，校验发布包与取出文件的 SHA256，
-//! 放进 `third_party/sing-box/bin/`（C-DEP-04）。任何一步的哈希不一致都直接失败，不留下未校验的文件。
+//! 按 `third_party/<组件>/lock.json` 拉取 sing-box 与 WinDivert 的发布包，校验发布包与取出文件的 SHA256，
+//! 放进 `third_party/<组件>/bin/`（C-DEP-04、C-DRV-01）。任何一步的哈希不一致都直接失败，不留下未校验的文件。
 //!
 //! 只用系统自带的工具：`curl.exe` 下载、`tar.exe`（bsdtar，可解 zip）解包，哈希用 Windows CNG
 //! （`procroute-platform-win::hash`），不为一次性的开发任务引入 HTTP、zip 或哈希库。
 //! 锁文件只有 Windows x64 一项（C-DRV-05），所以命令只在 Windows 上可用。
-//! WinDivert（T-071）锁定后在这里追加。
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,7 +14,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-const LOCK: &str = "third_party/sing-box/lock.json";
+/// 全部版本锁：组件目录（`third_party/` 下）。锁文件是 `<目录>/lock.json`，输出到 `<目录>/bin/`。
+const COMPONENTS: [&str; 2] = ["third_party/sing-box", "third_party/windivert"];
 const PLATFORM: &str = "windows-x86_64";
 
 /// 锁文件里的 `tag`、`revision`、`license`、`source` 只供人阅读与 NOTICE 对照，这里不读。
@@ -46,11 +46,15 @@ struct LockedFile {
 
 pub fn run() -> Result<()> {
     let root = crate::workspace_root();
-    let lock = read_lock(&root.join(LOCK))?;
-    let Some(asset) = lock.assets.get(PLATFORM) else {
-        bail!("{LOCK} 中没有 {PLATFORM} 的发布包");
-    };
-    imp::fetch(&root, &lock, asset)
+    for dir in COMPONENTS {
+        let lock_path = format!("{dir}/lock.json");
+        let lock = read_lock(&root.join(&lock_path))?;
+        let Some(asset) = lock.assets.get(PLATFORM) else {
+            bail!("{lock_path} 中没有 {PLATFORM} 的发布包");
+        };
+        imp::fetch(&root, &lock, asset, &format!("{dir}/bin"))?;
+    }
+    Ok(())
 }
 
 fn read_lock(path: &Path) -> Result<Lock> {
@@ -100,7 +104,7 @@ fn check_sha256(hex: &str) -> Result<()> {
 mod imp {
     use super::*;
 
-    pub(super) fn fetch(_root: &Path, lock: &Lock, _asset: &Asset) -> Result<()> {
+    pub(super) fn fetch(_root: &Path, lock: &Lock, _asset: &Asset, _bin: &str) -> Result<()> {
         bail!(
             "{} {} 目前只锁定了 {PLATFORM}，fetch-deps 只能在 Windows 上运行",
             lock.name,
@@ -119,10 +123,8 @@ mod imp {
 
     use super::*;
 
-    const BIN_DIR: &str = "third_party/sing-box/bin";
-
-    pub(super) fn fetch(root: &Path, lock: &Lock, asset: &Asset) -> Result<()> {
-        let bin = root.join(BIN_DIR);
+    pub(super) fn fetch(root: &Path, lock: &Lock, asset: &Asset, bin_dir: &str) -> Result<()> {
+        let bin = root.join(bin_dir);
         if up_to_date(&bin, asset)? {
             println!("{} {} 已是锁定版本，无需下载", lock.name, lock.version);
             return Ok(());
@@ -181,7 +183,7 @@ mod imp {
         }
         fs::remove_dir_all(&work).with_context(|| format!("清理 {}", work.display()))?;
         println!(
-            "{} {} 已放入 {BIN_DIR}/，哈希校验通过",
+            "{} {} 已放入 {bin_dir}/，哈希校验通过",
             lock.name, lock.version
         );
         Ok(())
@@ -239,17 +241,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repository_lock_file_is_valid() {
-        let lock = read_lock(&crate::workspace_root().join(LOCK)).expect("lock.json");
-        assert_eq!(lock.name, "sing-box");
-        let asset = lock.assets.get(PLATFORM).expect("windows x64 asset");
-        assert!(
-            asset.url.contains(&format!("/v{}/", lock.version)),
-            "{}",
-            asset.url
-        );
-        assert!(asset.files.iter().any(|f| f.name == "sing-box.exe"));
-        assert!(asset.files.iter().any(|f| f.name == "LICENSE"));
+    fn repository_lock_files_are_valid() {
+        let expected = [
+            ("sing-box", &["sing-box.exe", "LICENSE"][..]),
+            (
+                "WinDivert",
+                &["WinDivert.dll", "WinDivert64.sys", "LICENSE"][..],
+            ),
+        ];
+        for (dir, (name, files)) in COMPONENTS.iter().zip(expected) {
+            let lock =
+                read_lock(&crate::workspace_root().join(dir).join("lock.json")).expect("lock.json");
+            assert_eq!(lock.name, name);
+            let asset = lock.assets.get(PLATFORM).expect("windows x64 asset");
+            assert!(
+                asset.url.contains(&format!("/v{}/", lock.version)),
+                "{}",
+                asset.url
+            );
+            for f in files {
+                assert!(asset.files.iter().any(|x| x.name == *f), "{name}: {f}");
+            }
+        }
     }
 
     fn lock_with(url: &str, sha: &str, name: &str, archive_path: &str) -> String {

@@ -13,6 +13,7 @@ node_modules/
 
 # 第三方二进制由 cargo xtask fetch-deps 拉取，不提交
 /third_party/sing-box/bin/
+/third_party/windivert/bin/
 
 # 编辑器与系统
 .idea/
