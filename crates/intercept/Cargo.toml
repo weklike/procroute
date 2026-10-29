@@ -11,10 +11,28 @@ publish.workspace = true
 [features]
 # 上层（svc 的集成测试等）在非 Windows 上使用假后端
 mock = []
+# 编译会加载驱动的测试（tests/divert_vm.rs）。只在测试虚拟机里开启（C-TEST-04）。
+vm-tests = []
 
 [dependencies]
 procroute-proto = { path = "../proto" }
 thiserror = "2.0.21"
 
-[lints]
-workspace = true
+# WinDivert 后端只在 Windows 上编译
+[target.'cfg(windows)'.dependencies]
+procroute-platform-win = { path = "../platform-win" }
+serde_json = "1.0.154"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation"] }
+
+# 本 crate 是允许 `unsafe` 的两处之一（C-CODE-01）：crate 级别为 deny，只在 `divert::ffi`
+# 局部放开，每个 unsafe 块必须带 SAFETY 注释。其余 lint 与 workspace 保持一致。
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "deny"

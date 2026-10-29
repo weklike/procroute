@@ -84,7 +84,8 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | 全量单测（Windows） | `cargo nextest run --workspace` |
 | 前端单测 | `pnpm -C app test` |
 | 生成 IPC 的 TS 类型 | `cargo xtask gen-types` |
-| 拉取并校验第三方二进制 | `cargo xtask fetch-deps`（Windows；按 `third_party/*/lock.json` 校验 SHA256，输出到 `third_party/sing-box/bin/`） |
+| 拉取并校验第三方二进制 | `cargo xtask fetch-deps`（Windows；按 `third_party/*/lock.json` 校验 SHA256，输出到各自的 `third_party/<组件>/bin/`：sing-box、WinDivert） |
+| 驱动相关测试（只在虚拟机） | 管理员终端：`cargo nextest run -p procroute-intercept --features vm-tests`（会安装并加载 WinDivert 驱动，禁止在开发机上运行，C-TEST-04） |
 | 本地开发运行 | 开发机：`pnpm -C app dev`（浏览器里打开，模拟 IPC，不连真实服务）；桌面外壳：PowerShell 里 `$env:VITE_IPC_MOCK='1'; pnpm -C app tauri dev`（同样用模拟 IPC）；完整联调：在测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
 | 构建桌面客户端 | `pnpm -C app tauri build --debug --no-bundle`（先跑前端生产构建，再编译 `procroute-ui.exe`；不出安装包） |
 | 打包安装包 | `cargo xtask bundle` |
