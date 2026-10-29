@@ -10,11 +10,12 @@
 //! - [`kernel_lock`]：编译进来的版本锁，启动前据此校验 `sing-box.exe`（C-SEC-06）；
 //! - [`runtime`]：每次启动随机生成的控制 API 端口与密钥（C-NET-08）；
 //! - [`restart`] 与 `supervisor`：子进程守护与重启预算（T-056，C-PERF-05；守护只在 Windows 上）；
-//! - 控制 API 客户端（测速、连接列表，待实现）。
+//! - [`clash_api`]：控制 API 客户端，目前读取连接列表（TUN 模式的连接面板）；测速待实现。
 //!
 //! 与 `procwatch`、`intercept`、`relay` 之间没有直接依赖（C-ARCH-02），由 `svc` 组装。
 #![forbid(unsafe_code)]
 
+pub mod clash_api;
 pub mod config_gen;
 pub mod kernel_lock;
 pub mod link;

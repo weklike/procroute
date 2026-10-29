@@ -160,6 +160,31 @@ fn dropping_the_supervisor_kills_the_kernel() {
 }
 
 #[test]
+fn control_api_lists_connections() {
+    let api = api_addr();
+    let (sup, rx) = start(launch("api", api, idle_config(api)), fast_policy());
+    running_pid(&rx);
+    let conns = crate::clash_api::fetch_connections(
+        api,
+        &Secret::new(SECRET.to_owned()),
+        Duration::from_secs(5),
+    )
+    .expect("the locked kernel answers /connections");
+    assert!(conns.is_empty(), "nothing is routed through an idle kernel");
+    // 密钥不对时拒绝
+    let wrong = crate::clash_api::fetch_connections(
+        api,
+        &Secret::new("x".repeat(32)),
+        Duration::from_secs(5),
+    );
+    assert!(
+        matches!(wrong, Err(crate::clash_api::ApiError::Status(401))),
+        "{wrong:?}"
+    );
+    sup.stop();
+}
+
+#[test]
 fn hash_mismatch_refuses_to_start() {
     let api = api_addr();
     let mut l = launch("hash", api, idle_config(api));
