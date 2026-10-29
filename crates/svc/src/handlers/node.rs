@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `node.*`：导入分享链接、列出节点。
+//! `node.*`：导入分享链接与订阅、列出节点。订阅的拉取与刷新见 [`super::subscription`]。
 //!
 //! 解析在 `procroute-core-mgr::link`，支持范围以锁定的 sing-box 为准；这里负责去重、分配 id、
 //! 落盘（凭据经 DPAPI 加密，C-SEC-04）以及把节点映射成 IPC 类型。返回值与错误里不含凭据。
 //!
-//! 尚未接上、如实返回错误的：
-//! - 订阅拉取：服务需要 HTTP 客户端（新的运行时依赖，待确认）；
-//! - `node.test`：测速走 sing-box 的控制 API，依赖子进程守护（T-056）。
+//! 尚未接上、如实返回错误的：`node.test`（测速需要用户配置的测速地址，C-SEC-08、C-SEC-09）。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use procroute_core_mgr::link::{self, Issue, MAX_NODES, ParsedNode, TOO_MANY_NODES};
-use procroute_core_mgr::node::Credentials;
+use procroute_core_mgr::node::{Credentials, Node};
 use procroute_platform_win::secret::Secret;
 use procroute_proto::Empty;
 use procroute_proto::error::{ErrorCode, IpcError};
@@ -21,21 +19,18 @@ use procroute_proto::node::{
 };
 use serde_json::Value;
 
-use super::{Services, blocking, to_json};
+use super::{Services, blocking, subscription, to_json};
 use crate::ipc_server::parse_params;
 use crate::node_store::{NodeStoreError, StoredNode};
 
 /// 与已有节点参数、凭据完全相同时跳过。
-const DUPLICATE: &str = "duplicate";
+pub(super) const DUPLICATE: &str = "duplicate";
 
 pub(super) async fn import(svc: &Services, params: Value) -> Result<Value, IpcError> {
     let text = match parse_params::<NodeImportParams>(params)? {
         NodeImportParams::ShareLinks { text } => text,
-        NodeImportParams::Subscription { .. } => {
-            return Err(IpcError::new(
-                ErrorCode::NodeImportFailed,
-                "subscription fetching is not available in this build yet",
-            ));
+        NodeImportParams::Subscription { name, url } => {
+            return subscription::import(svc, name, url).await;
         }
     };
     let store = svc.nodes.clone();
@@ -57,7 +52,9 @@ pub(super) async fn import(svc: &Services, params: Value) -> Result<Value, IpcEr
 pub(super) async fn list(svc: &Services, params: Value) -> Result<Value, IpcError> {
     let Empty {} = parse_params(params)?;
     let store = svc.nodes.clone();
-    let nodes = blocking(move || store.load().map_err(storage_error)).await?;
+    let data = blocking(move || store.load_all().map_err(storage_error)).await?;
+    let subscriptions = subscription::infos(&data);
+    let nodes = data.nodes;
     // 每个节点都是一个单节点出站，标签即节点 id；节点组的增删改随后续任务接入
     let outbounds = nodes
         .iter()
@@ -72,14 +69,14 @@ pub(super) async fn list(svc: &Services, params: Value) -> Result<Value, IpcErro
     to_json(NodeListResult {
         nodes,
         outbounds,
-        subscriptions: Vec::new(),
+        subscriptions,
     })
 }
 
 pub(super) fn test(_svc: &Services, _params: Value) -> Result<Value, IpcError> {
     Err(IpcError::new(
         ErrorCode::KernelUnavailable,
-        "latency test needs the sing-box supervisor, which is not available in this build yet",
+        "latency test needs a user-configured probe URL, which is not available in this build yet",
     ))
 }
 
@@ -92,9 +89,7 @@ fn merge(
     let mut added = 0u32;
     // 达到总数上限后剩下的节点：只在第一个上报问题，其余计入跳过数
     let mut overflow = 0u32;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis());
+    let stamp = u128::from(now_ms());
     for (i, p) in parsed.into_iter().enumerate() {
         if overflow > 0 {
             overflow += 1;
@@ -102,7 +97,7 @@ fn merge(
         }
         if existing
             .iter()
-            .any(|e| e.node == p.node && same_credentials(&e.credentials, &p.credentials))
+            .any(|e| same_node(e, &p.node, &p.credentials))
         {
             issues.push(Issue {
                 line: p.line,
@@ -119,7 +114,7 @@ fn merge(
             continue;
         }
         existing.push(StoredNode {
-            id: unique_id(existing, stamp, i),
+            id: unique_id(|id| existing.iter().any(|e| e.id == id), stamp, i),
             name: p.name,
             subscription_id: None,
             node: p.node,
@@ -144,16 +139,28 @@ fn merge(
     }
 }
 
-/// `n<毫秒时间戳的十六进制>-<序号>`；与已有 id 冲突时顺延序号。
-fn unique_id(existing: &[StoredNode], stamp: u128, index: usize) -> String {
+/// `n<毫秒时间戳的十六进制>-<序号>`；`taken` 判断 id 是否已被占用，冲突时顺延序号。
+pub(super) fn unique_id(taken: impl Fn(&str) -> bool, stamp: u128, index: usize) -> String {
     let mut seq = index;
     loop {
         let id = format!("n{stamp:x}-{seq}");
-        if !existing.iter().any(|e| e.id == id) {
+        if !taken(&id) {
             return id;
         }
         seq += 1;
     }
+}
+
+/// 当前 Unix 毫秒时间。
+pub(super) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// 参数与凭据都相同的才算同一个节点。
+pub(super) fn same_node(stored: &StoredNode, node: &Node, credentials: &Credentials) -> bool {
+    stored.node == *node && same_credentials(&stored.credentials, credentials)
 }
 
 fn same_credentials(a: &Credentials, b: &Credentials) -> bool {

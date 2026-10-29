@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! 节点的落盘存储：`<配置根>\nodes.json`。
+//! 节点与订阅的落盘存储：`<配置根>\nodes.json`。
 //!
 //! 协议参数明文保存（不含凭据）；每个节点的凭据序列化后用机器范围 DPAPI 加密，以十六进制存放
-//! （C-SEC-04）。配置根目录的 DACL 只允许 SYSTEM 与 Administrators 写入（C-SEC-05）。
+//! （C-SEC-04）。订阅地址常含访问令牌，同样加密存放。配置根目录的 DACL 只允许 SYSTEM 与
+//! Administrators 写入（C-SEC-05）。
+//!
+//! 格式版本：1 只有节点；2 增加订阅。读到版本 1 时按「没有订阅」处理，下次写入即升级为版本 2。
 //! 读改写由一把互斥锁串行化；写入先写临时文件再改名。
 //!
 //! 这里全是阻塞 IO，异步代码必须经 `spawn_blocking` 调用（C-CODE-05）。
@@ -18,8 +21,8 @@ use procroute_platform_win::hash::to_hex;
 use procroute_platform_win::secret::Secret;
 use serde::{Deserialize, Serialize};
 
-/// 落盘格式版本。结构变更时加一并提供迁移。
-const FORMAT_VERSION: u32 = 1;
+/// 落盘格式版本。结构变更时加一并提供迁移（见模块文档）。
+const FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
@@ -44,11 +47,42 @@ pub struct StoredNode {
     pub credentials: Credentials,
 }
 
+/// 一个已保存的订阅。
+#[derive(Debug, Clone)]
+pub struct StoredSubscription {
+    pub id: String,
+    pub name: String,
+    /// 完整地址，可能含令牌；只用于拉取，不返回给界面。
+    pub url: Secret<String>,
+    pub updated_at_ms: Option<u64>,
+}
+
+/// 文件里的全部内容。
+#[derive(Debug, Clone, Default)]
+pub struct NodeData {
+    pub nodes: Vec<StoredNode>,
+    pub subscriptions: Vec<StoredSubscription>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
     version: u32,
     nodes: Vec<Record>,
+    /// 版本 1 没有这个字段。
+    #[serde(default)]
+    subscriptions: Vec<SubscriptionRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubscriptionRecord {
+    id: String,
+    name: String,
+    /// 地址的 DPAPI 密文十六进制。
+    url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -84,19 +118,29 @@ impl NodeStore {
 
     /// 读出全部节点（凭据已解密）。
     pub fn load(&self) -> Result<Vec<StoredNode>, NodeStoreError> {
+        Ok(self.load_all()?.nodes)
+    }
+
+    /// 读出节点与订阅。
+    pub fn load_all(&self) -> Result<NodeData, NodeStoreError> {
         let _guard = self.guard();
         self.read()
     }
 
-    /// 在锁内读出、修改、写回。`f` 返回的值原样带出；读取失败时不会写入，避免覆盖已有数据。
+    /// 在锁内读出、修改节点、写回。`f` 返回的值原样带出；读取失败时不会写入，避免覆盖已有数据。
     pub fn update<T>(
         &self,
         f: impl FnOnce(&mut Vec<StoredNode>) -> T,
     ) -> Result<T, NodeStoreError> {
+        self.update_all(|data| f(&mut data.nodes))
+    }
+
+    /// 同 [`NodeStore::update`]，可以同时修改订阅。
+    pub fn update_all<T>(&self, f: impl FnOnce(&mut NodeData) -> T) -> Result<T, NodeStoreError> {
         let _guard = self.guard();
-        let mut nodes = self.read()?;
-        let out = f(&mut nodes);
-        self.write(&nodes)?;
+        let mut data = self.read()?;
+        let out = f(&mut data);
+        self.write(&data)?;
         Ok(out)
     }
 
@@ -105,18 +149,19 @@ impl NodeStore {
         self.lock.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn read(&self) -> Result<Vec<StoredNode>, NodeStoreError> {
+    fn read(&self) -> Result<NodeData, NodeStoreError> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(NodeData::default()),
             Err(e) => return Err(e.into()),
         };
         let file: File =
             serde_json::from_str(&text).map_err(|_| NodeStoreError::Corrupt("invalid JSON"))?;
-        if file.version != FORMAT_VERSION {
+        if !(1..=FORMAT_VERSION).contains(&file.version) {
             return Err(NodeStoreError::UnsupportedVersion(file.version));
         }
-        file.nodes
+        let nodes = file
+            .nodes
             .into_iter()
             .map(|r| {
                 Ok(StoredNode {
@@ -127,11 +172,40 @@ impl NodeStore {
                     node: r.node,
                 })
             })
-            .collect()
+            .collect::<Result<_, NodeStoreError>>()?;
+        let subscriptions = file
+            .subscriptions
+            .into_iter()
+            .map(|r| {
+                Ok(StoredSubscription {
+                    url: decrypt_text(&r.url)?,
+                    id: r.id,
+                    name: r.name,
+                    updated_at_ms: r.updated_at_ms,
+                })
+            })
+            .collect::<Result<_, NodeStoreError>>()?;
+        Ok(NodeData {
+            nodes,
+            subscriptions,
+        })
     }
 
-    fn write(&self, nodes: &[StoredNode]) -> Result<(), NodeStoreError> {
-        let records = nodes
+    fn write(&self, data: &NodeData) -> Result<(), NodeStoreError> {
+        let subscriptions = data
+            .subscriptions
+            .iter()
+            .map(|s| {
+                Ok(SubscriptionRecord {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    url: to_hex(&dpapi::protect(s.url.expose().as_bytes())?),
+                    updated_at_ms: s.updated_at_ms,
+                })
+            })
+            .collect::<Result<Vec<_>, NodeStoreError>>()?;
+        let records = data
+            .nodes
             .iter()
             .map(|n| {
                 Ok(Record {
@@ -146,6 +220,7 @@ impl NodeStore {
         let text = serde_json::to_string_pretty(&File {
             version: FORMAT_VERSION,
             nodes: records,
+            subscriptions,
         })
         .map_err(io::Error::other)?;
         let tmp = self.path.with_extension("json.tmp");
@@ -191,6 +266,15 @@ fn decrypt(hex: &str) -> Result<Credentials, NodeStoreError> {
         *slot = Some(Secret::new(value));
     }
     Ok(c)
+}
+
+/// 十六进制 DPAPI 密文 → UTF-8 文本。
+fn decrypt_text(hex: &str) -> Result<Secret<String>, NodeStoreError> {
+    let cipher = from_hex(hex).ok_or(NodeStoreError::Corrupt("encrypted text is not hex"))?;
+    let plain = dpapi::unprotect(&cipher)?;
+    String::from_utf8(plain.expose().clone())
+        .map(Secret::new)
+        .map_err(|_| NodeStoreError::Corrupt("encrypted text is not UTF-8"))
 }
 
 fn from_hex(s: &str) -> Option<Vec<u8>> {
@@ -281,6 +365,64 @@ pub(crate) mod tests {
             s.load(),
             Err(NodeStoreError::UnsupportedVersion(9))
         ));
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn subscriptions_round_trip_with_encrypted_urls() {
+        let (s, dir) = store("subs");
+        s.update_all(|d| {
+            d.subscriptions.push(StoredSubscription {
+                id: "s1".into(),
+                name: "我的订阅".into(),
+                url: Secret::new("https://sub.example.com/s?token=hunter2-token".into()),
+                updated_at_ms: Some(42),
+            });
+            let mut n = trojan("n1", "p");
+            n.subscription_id = Some("s1".into());
+            d.nodes.push(n);
+        })
+        .expect("update");
+        let data = s.load_all().expect("load");
+        assert_eq!(data.subscriptions.len(), 1);
+        assert_eq!(
+            data.subscriptions[0].url.expose(),
+            "https://sub.example.com/s?token=hunter2-token"
+        );
+        assert_eq!(data.subscriptions[0].updated_at_ms, Some(42));
+        assert_eq!(data.nodes[0].subscription_id.as_deref(), Some("s1"));
+        let on_disk = std::fs::read_to_string(dir.join("nodes.json")).expect("read");
+        assert!(
+            !on_disk.contains("hunter2"),
+            "subscription URLs are encrypted"
+        );
+        assert!(!on_disk.contains("sub.example.com"));
+        // 只改节点的旧接口不会丢订阅
+        s.update(|n| n.clear()).expect("update");
+        assert_eq!(s.load_all().expect("load").subscriptions.len(), 1);
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn version_1_files_load_and_upgrade_on_write() {
+        let (s, dir) = store("v1");
+        let blob = to_hex(&dpapi::protect(br#"{"password":"p"}"#).expect("protect"));
+        let node = serde_json::to_value(trojan("n1", "p").node).expect("node");
+        let v1 = serde_json::json!({
+            "version": 1,
+            "nodes": [ { "id": "n1", "name": "旧节点", "node": node, "credentials": blob } ],
+        });
+        std::fs::write(dir.join("nodes.json"), v1.to_string()).expect("write");
+        let data = s.load_all().expect("v1 loads");
+        assert_eq!(data.nodes.len(), 1);
+        assert!(data.subscriptions.is_empty());
+        s.update(|_| {}).expect("rewrite");
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("nodes.json")).expect("read"))
+                .expect("json");
+        assert_eq!(on_disk["version"], 2);
+        assert_eq!(on_disk["subscriptions"], serde_json::json!([]));
+        assert_eq!(s.load().expect("load")[0].name, "旧节点");
         std::fs::remove_dir_all(dir).expect("cleanup");
     }
 
