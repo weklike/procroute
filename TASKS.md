@@ -44,7 +44,7 @@
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
 | M1 | T-050 ~ T-058、T-060 ~ T-062 | 在虚拟机里验证 TUN + `block` 的 WFP 阻断（`procroute-platform-win --features vm-tests`） |
-| M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074 | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
+| M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074、T-079（ETW 部分待管理员终端验证，见下） | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
 | M3 | T-090、T-092（中继嗅探 + 远程 DNS，见下）、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-095 的接线随 T-078 |
 | M4 | T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
 
@@ -156,9 +156,26 @@
   - C-NET-03（2026-10-29 定为动态 WFP 过滤器）：sing-box 退出时 TUN 与路由随之撤销。`block` 策略的 TUN 会话在
     内核启动前由 `svc::fail_closed` 装上过滤器（`platform-win::wfp`）：对每个目标可执行文件，本地地址在 TUN 网段内
     放行，远端为回环 / 链路本地 / 组播放行，其余阻断；动态会话随服务退出自动删除（C-NET-06）。名称、目录、通配、
-    正则规则靠扫描运行中的进程（启动时一次，之后每 500 ms），**已知窗口**：内核不在时新启动的命中进程最多 500 ms
-    没有保护，进程追踪（T-079）接入后消除。过滤器装不上则不启动会话（`session.fail_closed_unsupported`）。
+    正则规则由进程追踪（T-079）跟进：启动时快照一遍，之后靠 ETW 进程事件（约 100 ms），ETW 不可用时每 500 ms
+    快照一次。**已知窗口**：内核不在、命中进程刚启动而事件还没送到的这段时间没有保护。只保护自身命中规则的可执行
+    文件（TUN 模式下继承不生效）。过滤器装不上则不启动会话（`session.fail_closed_unsupported`）。
     **待验证**：`crates/platform-win/tests/wfp_vm.rs` 在虚拟机里以管理员身份运行。
+- T-079：`procroute-procwatch`（新 crate）。`tree` 是跨平台的进程树：键为「PID + 创建时间」，同一 PID 出现更晚的
+  创建时间即按旧进程退出处理，更早的视为过时事件；判定用 `rules::inherit::decide_child`；目标集合的变化以
+  `Change::{Targeted, Released}` 交出（`inherited` 标出继承来的子进程），换方案时按创建时间顺序重判、只报变化。
+  `watcher`（Windows）在专用线程上持有进程树：先开 ETW 会话再拍快照（启动返回前完成第一次快照），之后由事件驱动，
+  每 30 s 用快照校正；事件队列满或会话被外部停掉时立即校正 / 退回每 500 ms 快照。不依赖 intercept（C-ARCH-02），
+  由 svc 接线：目前接到 TUN fail-closed 的 `WfpGuard`，精确模式的接线随 T-078 / T-094。
+  - ETW 的 unsafe 部分在 `platform-win::etw`（C-CODE-01）：订阅 `Microsoft-Windows-Kernel-Process` 的
+    `WINEVENT_KEYWORD_PROCESS`，负载按清单模板的定长前缀解码。**版本 3 起启动事件在 `CreateTime` 前插入了
+    `ProcessSequenceNumber`**，偏移表按 (事件 id, 版本) 区分，单元测试读本机清单（`Get-WinEvent -ListProvider`，
+    不需要管理员）核对。`platform-win::process` 新增 `process_creation_time` 与核对创建时间的
+    `process_image_path_checked`；快照里的路径展开 8.3 短名（C-DRV-04）。
+  - 文件划分与原计划不同：ETW 的消费在 `platform-win::etw`，procwatch 里是 `tree.rs`、`snapshot.rs`、`watcher.rs`。
+  - **待验证**（管理员终端，开发机或虚拟机）：`cargo nextest run -p procroute-platform-win -p procroute-procwatch
+    --features admin-tests`，覆盖真实 ETW 事件、事件里的创建时间与 `GetProcessTimes` 一致、残留会话替换、1 秒内继承。
+    服务启动后会移除大部分令牌特权（只留 SeTcb / SeLoadDriver / SeChangeNotify / SeCreateGlobal），ETW 会话在
+    这种令牌下能否启动也要在虚拟机里看服务日志确认；启动不了时退回快照并记一条 warn，不影响功能。
 
 ## 阶段 M0 — 脚手架与可跨平台内核（第 1–2 周）
 
