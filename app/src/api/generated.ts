@@ -236,7 +236,12 @@ export type NodeProtocol = "shadowsocks" | "vmess" | "vless" | "trojan" | "hyste
 /**
  * `node.test` 的参数；`ids` 为空表示测全部节点。
  */
-export type NodeTestParams = { ids: Array<string>, };
+export type NodeTestParams = { ids: Array<string>, 
+/**
+ * 测速地址（`https://`），经每个节点访问它并计时。必须由用户配置，软件不内置任何地址
+ * （C-SEC-08、C-SEC-09）；缺省或不是 `https://` 时服务拒绝测速。
+ */
+url?: string, };
 
 /**
  * `node.test` 的返回值。
