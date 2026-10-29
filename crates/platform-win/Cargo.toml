@@ -11,6 +11,8 @@ publish.workspace = true
 [features]
 # 编译会改动网络行为的测试（tests/wfp_vm.rs）。只在测试虚拟机里开启（C-TEST-04）。
 vm-tests = []
+# 编译需要管理员终端的测试（tests/etw_admin.rs）：只开私有 ETW 会话、不改网络与系统设置。
+admin-tests = []
 
 [dependencies]
 procroute-rules = { path = "../rules" }
@@ -32,6 +34,7 @@ features = [
     "Win32_Security_Cryptography_Sip",
     "Win32_Security_WinTrust",
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Etw",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
@@ -40,6 +43,8 @@ features = [
     "Win32_System_Rpc",
     "Win32_System_Services",
     "Win32_System_Threading",
+    # EVENT_TRACE_LOGFILEW 依赖它
+    "Win32_System_Time",
 ]
 
 # 控制管道用 tokio 的命名管道实现（异步运行时统一 tokio，AGENTS 5.1）。

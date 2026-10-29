@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! 进程身份查询：管道客户端 PID、进程映像路径、进程用户 SID、所在会话，以及进程快照。
+//! 进程身份查询：管道客户端 PID、进程映像路径、进程用户 SID、所在会话、创建时间，以及进程快照。
 //!
 //! 服务据此校验控制管道的客户端（C-SEC-02）、在审计日志里记录调用者 SID（C-SEC-03），
-//! 并为界面列出运行中的进程（`process.list`）。
+//! 为界面列出运行中的进程（`process.list`），并为进程追踪提供「PID + 创建时间」身份（C-DRV-04）。
 #![allow(unsafe_code)] // 需要调用 GetNamedPipeClientProcessId / OpenProcess / Toolhelp 等；每处都有 SAFETY 注释
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, FILETIME, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::TOKEN_QUERY;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -17,8 +17,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    GetProcessTimes, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 use crate::acl::token_user_sid;
@@ -36,7 +36,50 @@ pub fn pipe_client_pid(pipe: &impl AsRawHandle) -> io::Result<u32> {
 
 /// 进程映像的 Win32 路径，例如 `C:\Program Files\ProcRoute\procroute-ui.exe`。
 pub fn process_image_path(pid: u32) -> io::Result<String> {
+    image_path_of(&open_process(pid)?)
+}
+
+/// 进程的创建时间：FILETIME（自 1601 年起，100 ns 为单位）。与 PID 一起构成进程身份（C-DRV-04），
+/// 与 ETW 进程事件里的 `CreateTime` 同源。
+pub fn process_creation_time(pid: u32) -> io::Result<u64> {
+    creation_time_of(&open_process(pid)?)
+}
+
+/// 先核对创建时间再取映像路径：PID 已被别的进程复用时返回 `NotFound`，不会把新进程的路径
+/// 安到旧进程头上（C-DRV-04）。
+pub fn process_image_path_checked(pid: u32, created_at: u64) -> io::Result<String> {
     let process = open_process(pid)?;
+    if creation_time_of(&process)? != created_at {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the process id now belongs to another process",
+        ));
+    }
+    image_path_of(&process)
+}
+
+fn creation_time_of(process: &OwnedHandle) -> io::Result<u64> {
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: 句柄有效且带 PROCESS_QUERY_LIMITED_INFORMATION；四个输出参数都是可写的 FILETIME。
+    let ok = unsafe {
+        GetProcessTimes(
+            process.as_raw_handle() as HANDLE,
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
+}
+
+fn image_path_of(process: &OwnedHandle) -> io::Result<String> {
     let mut buf = vec![0u16; 1024];
     for _ in 0..2 {
         let mut len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
@@ -162,6 +205,33 @@ mod tests {
         // PID 必须是 4 的倍数，奇数 PID 永远不存在。
         assert!(process_image_path(3).is_err());
         assert!(process_session_id(3).is_err());
+        assert!(process_creation_time(3).is_err());
+    }
+
+    #[test]
+    fn creation_time_identifies_this_process() {
+        let me = std::process::id();
+        let created = process_creation_time(me).expect("creation time");
+        assert_eq!(process_creation_time(me).expect("again"), created);
+        // 2020-01-01 之后、且早于当前时间（FILETIME）
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+            / 100
+            + 116_444_736_000_000_000;
+        assert!(created > 132_223_104_000_000_000 && u128::from(created) <= now);
+
+        let exe = std::env::current_exe().expect("current exe");
+        assert_eq!(
+            process_image_path_checked(me, created)
+                .expect("path")
+                .to_lowercase(),
+            exe.to_string_lossy().to_lowercase()
+        );
+        // 创建时间对不上：当作 PID 已被复用
+        let reused = process_image_path_checked(me, created + 1).expect_err("mismatch");
+        assert_eq!(reused.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
