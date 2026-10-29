@@ -68,8 +68,9 @@
   `authenticode`、`service` 模块；客户端校验单独放 `crates/svc/src/client_auth.rs`。管道上一行一条 JSON-RPC 消息
   （`\n` 或 `\r\n` 结尾，不含行尾不超过 1 MiB）。签名校验关闭吊销检查、只用本地缓存（C-SEC-08）。
   开发构建可开 `insecure-skip-client-auth` 特性跳过客户端校验，release 构建开启会编译失败（C-SEC-02）。
-- T-058：`profile.*`、`session.*`、`node.import`（分享链接）/ `node.list`、配置目录 ACL（`platform-win::dir_acl`，
-  C-SEC-05）、服务模式日志 `logs\svc.log`。`node.test` 仍返回 `kernel.unavailable`；订阅导入返回 `node.import_failed`；
+- T-058：`profile.*`、`session.*`、`node.import`（分享链接）/ `node.list`、`process.list`、配置目录 ACL
+  （`platform-win::dir_acl`，C-SEC-05）、服务模式日志 `logs\svc.log`。`process.list` 只列与调用者同一 Windows
+  会话的进程（服务能看到所有用户的进程），并标出命中运行中会话方案的进程组。`node.test` 仍返回 `kernel.unavailable`；订阅导入返回 `node.import_failed`；
   其他未接入的方法返回 `internal.error`，不假装成功。日志暂无轮转。
   - `session.start` 目前只能启动 TUN 模式且 `fail_policy = allow`：精确进程模式返回 `driver.not_loaded`（等 T-071 起的
     拦截后端）；TUN + `block` 返回新增的 `session.fail_closed_unsupported`（见下面 T-055 的 C-NET-03 一条）。
