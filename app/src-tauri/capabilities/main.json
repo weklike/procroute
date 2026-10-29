@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "主窗口只能调用实际用到的命令与事件监听（C-SEC-10）；应用命令登记在 build.rs 的 app manifest 里。",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-ipc-call",
+    "allow-tray-update",
+    "allow-autostart-get",
+    "allow-autostart-set"
+  ]
+}

@@ -2,3 +2,5 @@ dist
 coverage
 pnpm-lock.yaml
 src/api/generated.ts
+src-tauri/target
+src-tauri/gen

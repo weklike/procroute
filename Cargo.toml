@@ -2,6 +2,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "app/src-tauri",
     "crates/config",
     "crates/core-mgr",
     "crates/intercept",

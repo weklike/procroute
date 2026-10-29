@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "procroute-ui"
+description = "ProcRoute 的 Windows 客户端外壳（Tauri 2）：控制管道 IPC 客户端、窗口与托盘"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 界面只依赖 proto（C-ARCH-02）。Tauri 只在 Windows 上编译；其他平台只编译一个提示后退出的 main，
+# 保证 workspace 在 Linux CI 上可编译（与 procroute-svc 相同的做法）。
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[target.'cfg(windows)'.dependencies]
+procroute-proto = { path = "../../crates/proto" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tauri = { version = "2.12.5", features = ["tray-icon"] }
+# 第二次启动时把已运行的实例窗口调到前台，而不是再开一个托盘图标
+tauri-plugin-single-instance = "2.5.5"
+# 开机自启（T-113）：写当前用户的 Run 键，不需要管理员权限（C-ARCH-01）
+tauri-plugin-autostart = "2.7.0"
+thiserror = "2.0.21"
+# 与服务端相同的命名管道实现；Tauri 自身的异步运行时也是 tokio
+tokio = { version = "1.54.1", features = ["net", "io-util", "sync", "time", "macros", "rt"] }
+
+[lints]
+workspace = true

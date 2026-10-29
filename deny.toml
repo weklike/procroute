@@ -3,6 +3,11 @@
 
 [graph]
 all-features = true
+# 只审计实际分发的目标：安装包只有 Windows x64（C-DRV-05）；Linux 只在 CI 上编译测试跨平台 crate，
+# 产物不分发。不限定时，Tauri 及其插件只在 Linux / macOS 上用到的 GTK、D-Bus 等依赖也会被算进来；
+# 同时列出两个目标也不行：cargo-deny 对每条依赖边只要匹配任一目标就保留，会把「Windows 上才依赖
+# 插件」和「插件在 Linux 上才依赖 zbus」拼在一起。
+targets = ["x86_64-pc-windows-msvc"]
 
 [advisories]
 version = 2
