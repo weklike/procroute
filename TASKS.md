@@ -43,9 +43,9 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-058（T-058 余下订阅拉取与 `node.test`，见下）、T-060 ~ T-062 | TUN + `block` 的 fail-closed（待定，见下）；订阅拉取待定依赖；`node.test` |
-| M2 | T-070、T-073、T-074 | T-071（需要 Windows） |
-| M3 | T-090、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-092 需要先定方案（见下）；T-095 的接线随 T-078 |
+| M1 | T-050 ~ T-058（T-058 余下 `node.test`，见下）、T-060 ~ T-062 | TUN + `block` 的 fail-closed：服务持有的动态 WFP 过滤器（2026-10-29 已定，需要虚拟机验证）；`node.test` |
+| M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074 | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
+| M3 | T-090、T-092（中继嗅探 + 远程 DNS，见下）、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-095 的接线随 T-078 |
 | M4 | T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
 
 偏离原计划的地方：
@@ -94,12 +94,21 @@
     （`app/src/features/node/issues.ts`），未知代码原样显示。
   - 存储：`<配置根>\nodes.json`，参数明文、凭据按节点 DPAPI 加密后十六进制存放（C-SEC-04）；读失败时不覆盖。
     每个节点暂时就是一个 `single` 出站（标签 = 节点 id），节点组的增删改还没有 IPC 方法。
-  - **待定**：订阅拉取需要服务端 HTTP 客户端（新的运行时依赖，AGENTS 第 8 节第 2 条）；Clash / mihomo YAML
-    订阅需要 YAML 解析库，同样待确认后再接。
+  - 订阅（2026-10-29 定用 WinHTTP）：`platform-win::http` 封装系统 WinHTTP（TLS 由 Schannel 校验，不引入 HTTP / TLS
+    库），只由用户操作触发（C-SEC-08），上限 10 MB（C-SEC-07）。再次导入同一地址即刷新：内容没变的节点保留原 id。
+    订阅地址可能含令牌，加密落盘，只有 `scheme://host` 出现在日志、错误与界面里（C-SEC-04）。`nodes.json` 升到
+    格式 2（读到格式 1 视为没有订阅，下次写入即升级）。Clash / mihomo YAML 订阅仍不支持（需要 YAML 库，未定）。
 - T-056：sing-box 的配置经标准输入（`-c stdin`）交给内核，不写进 `run\` 目录：配置里有节点凭据明文，落盘会违反
   C-SEC-04（优先于设计文档第 8 节的「写在 run\ 目录」）；`run\` 只作为 sing-box 的工作目录。版本锁在编译时嵌入
   （`core-mgr::kernel_lock`），每次（重新）启动前校验安装目录里的 `sing-box.exe`，校验到进程创建完成之间以只读共享
   持有文件；内核放进关闭即终止的作业对象，随服务退出（C-NET-06）。
+- T-071：WinDivert 2.2.2 锁在 `third_party/windivert/lock.json`（上游未公布哈希；发布包哈希与 SourceForge 镜像公布的
+  一致，驱动的 EV 签名有效，签名主体记录在该目录的 README，请维护者确认）。`fetch-deps` 一并拉取。服务运行时从安装
+  目录按完整路径加载 `WinDivert.dll`，加载前校验 DLL 与驱动的 SHA-256，驱动文件在使用期间以只读共享方式锁定，不能被
+  删除或替换（C-DRV-01、C-DRV-02）。打开句柄会加载驱动，相关测试在 `crates/intercept/tests/divert_vm.rs`，只在
+  `--features vm-tests` 时编译，必须在虚拟机里以管理员身份运行（C-TEST-04）；开发机上只测 DLL 加载与过滤器语法。
+  **待验证**：`WINDIVERT_ADDRESS` 里地址数组的字序（按 WinDivert 的 `ntoh` 助手推断为 `[0]` 最低位），由
+  `socket_layer_reports_this_process_connects` 在虚拟机里确认。
 - 桌面客户端（`app/src-tauri`，包名 `procroute-ui`）：只依赖 proto；一条长连接、断线每 2 秒重连并重放订阅。
   外壳自己的事件 `shell:connection`（与服务的连接变化，界面据此清空服务端数据，C-UI-02）与 `shell:tray`（托盘点击）
   不属于 IPC 协议，类型写在 `app/src/api/shell.ts`。托盘菜单由前端生成并下发（文案走 i18n，C-UI-04），外壳只处理
@@ -116,14 +125,14 @@
   （随机端口与密码），每个进程组一个用户（用户名 = 组标签，与 relay 的握手一致），`auth_user` 路由到各组出站；
   入口上未匹配任何组的连接最后一条规则拒绝，不直连（C-NET-03）。用锁定版本 `sing-box check` 回归，快照在
   `crates/core-mgr/snapshots/precise_sample.json`。svc 的接线随 T-078。
-- **T-092 需要先定方案（与设计文档 6.3 不一致，AGENTS 第 8 节第 6 条）**：sing-box 1.13 起删除了入站的
-  `sniff_override_destination`（1.14.4 解析时直接报错），规则动作里也没有「用嗅探出的域名替换目标地址」的替代，
-  所以「对改道连接嗅探域名并覆盖目标地址、让远端重新解析」无法只靠 sing-box 配置实现。可选做法：
-  1. 由 relay 在发 SOCKS5 CONNECT 之前读取客户端首包（TLS SNI / HTTP Host），用域名代替 IP 连接；只对
-     客户端先发数据的端口（如 80 / 443）这样做，避免服务端先发数据的协议多等；QUIC 需要另外处理；
-  2. 远端 DNS：方案里增加用户配置的上游 DNS（不能内置第三方地址，C-SEC-09），目标进程直发的 53 端口查询
-     劫持到内核、经代理出站解析；需要 Profile 加字段（`schema_version` + 1 与迁移，C-ARCH-06）。
-  入口上已开启嗅探（连接面板可显示域名），但不改变目标地址。
+- T-092（2026-10-29 定为「两者都做」）：sing-box 1.13 起删除了入站的 `sniff_override_destination`（1.14.4 解析时
+  直接报错），规则动作里也没有替代，所以设计文档 6.3 的「用嗅探出的域名覆盖目标地址」改为：
+  1. 中继嗅探（`relay::sniff`）：在 Web 端口（默认 80 / 443）上先读客户端首包，取 TLS SNI / HTTP Host 后按域名发
+     SOCKS5 CONNECT，读到的字节在 CONNECT 后补发；取不到或 300 ms 超时就按原始 IP 连接。QUIC 暂不嗅探（可开
+     「阻断 QUIC」让应用回落 TCP）。TUN 模式没有中继，走系统解析的应用仍会拿到被污染的地址（已知局限）。
+  2. 远程 DNS（方案 schema 2 的 `dns.remote_server`）：用户填写 udp / tcp / tls / https 服务器，目标进程直发的
+     53 端口查询被劫持到内核，经该进程组的出站解析（每个出站一个服务器，`detour`）；TUN 按进程、精确模式按 SOCKS
+     用户匹配。不内置任何服务器地址（C-SEC-09）。精确模式下把目标进程的 UDP 53 交给中继，随 T-091 接入。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
 - sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的
   `curl.exe` / `tar.exe` 拉取，SHA256 用 Windows CNG（`platform-win::hash`，T-056 校验 sing-box 时复用），
