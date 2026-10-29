@@ -45,7 +45,7 @@
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
 | M1 | T-050 ~ T-058（T-058 余下订阅拉取与 `node.test`，见下）、T-060 ~ T-062 | TUN + `block` 的 fail-closed（待定，见下）；订阅拉取待定依赖；`node.test` |
 | M2 | T-070、T-073、T-074 | T-071（需要 Windows） |
-| M3 | T-090、T-096、T-097 | T-091（需要 Windows）；T-092、T-095 依赖 T-055 |
+| M3 | T-090、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-092 需要先定方案（见下）；T-095 的接线随 T-078 |
 | M4 | T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
 
 偏离原计划的地方：
@@ -75,6 +75,9 @@
     拦截后端）；TUN + `block` 返回新增的 `session.fail_closed_unsupported`（见下面 T-055 的 C-NET-03 一条）。
     内核状态（重启中、恢复、超出重启上限）实时写回会话：`block` 进入 `blocked`，`allow` 结束会话、内核显示失败。
     内核的启动经 `svc::kernel::KernelLauncher`，测试用假实现；开发机上不真正建 TUN（C-TEST-04）。
+  - TUN 模式的连接面板：会话运行期间每秒读一次内核控制 API 的连接列表（`core-mgr::clash_api`，手写 HTTP/1.0，
+    不引入 HTTP 库），差异转成 `conn.subscribe` 事件（`svc::conn_watch`）。只推被改道的连接，内核路由为 `direct`
+    的不推也不保留（C-NET-02）；进程组按规则引擎对进程路径重新判定；TUN 模式拿不到 PID，事件里为 0。
   - 管道上的推送：握手后每次会话状态变化都推 `session.status`；`conn.subscribe` / `log.subscribe` 由管道服务端
     处理（不进 `Handler`），订阅持续到连接断开，`log.subscribe` 按 `min_level` 过滤。服务日志经 `svc::log_stream`
     转成日志事件；sing-box 自己的输出直接丢弃（它的日志带网关、目标地址）。连接事件的来源随 M2 接入。
@@ -108,6 +111,18 @@
     小模块提供，待确认。
   - 修复：生产构建曾把模拟服务（含示例数据）打进包里（Vite 8 / Rolldown 不会跨函数判断 `import.meta.env.DEV`），
     现在动态 import 直接放在 `DEV` 分支里，CI 检查生产构建产物。
+- T-095（配置生成部分）：`core-mgr::config_gen::generate_precise` 生成精确模式配置：一个回环 SOCKS5 入口
+  （随机端口与密码），每个进程组一个用户（用户名 = 组标签，与 relay 的握手一致），`auth_user` 路由到各组出站；
+  入口上未匹配任何组的连接最后一条规则拒绝，不直连（C-NET-03）。用锁定版本 `sing-box check` 回归，快照在
+  `crates/core-mgr/snapshots/precise_sample.json`。svc 的接线随 T-078。
+- **T-092 需要先定方案（与设计文档 6.3 不一致，AGENTS 第 8 节第 6 条）**：sing-box 1.13 起删除了入站的
+  `sniff_override_destination`（1.14.4 解析时直接报错），规则动作里也没有「用嗅探出的域名替换目标地址」的替代，
+  所以「对改道连接嗅探域名并覆盖目标地址、让远端重新解析」无法只靠 sing-box 配置实现。可选做法：
+  1. 由 relay 在发 SOCKS5 CONNECT 之前读取客户端首包（TLS SNI / HTTP Host），用域名代替 IP 连接；只对
+     客户端先发数据的端口（如 80 / 443）这样做，避免服务端先发数据的协议多等；QUIC 需要另外处理；
+  2. 远端 DNS：方案里增加用户配置的上游 DNS（不能内置第三方地址，C-SEC-09），目标进程直发的 53 端口查询
+     劫持到内核、经代理出站解析；需要 Profile 加字段（`schema_version` + 1 与迁移，C-ARCH-06）。
+  入口上已开启嗅探（连接面板可显示域名），但不改变目标地址。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
 - sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的
   `curl.exe` / `tar.exe` 拉取，SHA256 用 Windows CNG（`platform-win::hash`，T-056 校验 sing-box 时复用），
