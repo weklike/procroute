@@ -40,14 +40,14 @@ crates/
   platform-win/  Windows API 封装：路径规范化、DPAPI、ACL、服务控制      [Windows；Secret<T> 跨平台]
   svc/           二进制：Windows 服务入口，唯一的组装点                 [Windows]
 app/
-  src-tauri/     Rust：IPC 客户端、托盘、自动更新（只依赖 proto）
+  src-tauri/     Rust（包名 procroute-ui）：控制管道客户端 ipc.rs、窗口 / 托盘 / 开机自启 shell.rs（只依赖 proto）
   src/           React 19 + TypeScript
     routes/        页面与路由定义（TanStack Router）
     features/      按领域划分：session/ profile/ node/ conn/ log/，各自含 api.ts（Query hooks）与组件
     components/    通用组件；components/ui/ 为 shadcn/ui 组件源码
     hooks/         通用 hooks，含 useIpcSubscription
     stores/        Zustand store（只放纯前端状态）
-    api/           generated.ts 由 gen-types 生成（禁止手改）；client.ts 为手写 IPC 薄封装
+    api/           generated.ts 由 gen-types 生成（禁止手改）；client.ts 为手写 IPC 薄封装；shell.ts 为外壳命令（托盘、自启、连接状态）薄封装
     i18n/          zh-CN / en-US 文案资源
 third_party/
   windivert/     锁定版本的 dll/sys + SHA256 + LICENSE（只读）
@@ -85,7 +85,8 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | 前端单测 | `pnpm -C app test` |
 | 生成 IPC 的 TS 类型 | `cargo xtask gen-types` |
 | 拉取并校验第三方二进制 | `cargo xtask fetch-deps`（Windows；按 `third_party/*/lock.json` 校验 SHA256，输出到 `third_party/sing-box/bin/`） |
-| 本地开发运行 | 开发机：`pnpm -C app dev`（模拟 IPC，不连真实服务）；完整联调：在测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
+| 本地开发运行 | 开发机：`pnpm -C app dev`（浏览器里打开，模拟 IPC，不连真实服务）；桌面外壳：PowerShell 里 `$env:VITE_IPC_MOCK='1'; pnpm -C app tauri dev`（同样用模拟 IPC）；完整联调：在测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
+| 构建桌面客户端 | `pnpm -C app tauri build --debug --no-bundle`（先跑前端生产构建，再编译 `procroute-ui.exe`；不出安装包） |
 | 打包安装包 | `cargo xtask bundle` |
 | 端到端测试 | `cargo xtask e2e --vm <name>`（只在 Hyper-V 虚拟机中运行） |
 | 依赖与许可审计 | `cargo deny check` ；`pnpm -C app audit` |
