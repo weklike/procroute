@@ -30,6 +30,8 @@ use crate::store::tests::sample;
 #[derive(Default)]
 struct FakeLauncher {
     fail: bool,
+    /// 在控制 API 地址上起一个假的测速接口（见 `tests::latency`）。
+    serve_delay: bool,
     launches: Mutex<Vec<(String, SocketAddr)>>,
     callbacks: Mutex<Vec<StateCallback>>,
     stopped: Arc<AtomicUsize>,
@@ -67,6 +69,9 @@ impl KernelLauncher for FakeLauncher {
             .lock()
             .expect("launches")
             .push((config.expose().clone(), api));
+        if self.serve_delay {
+            latency::serve_delay_api(api);
+        }
         on_state(KernelState::Running { pid: 42 });
         self.callbacks.lock().expect("callbacks").push(on_state);
         Ok(Box::new(FakeKernel {
@@ -637,10 +642,6 @@ async fn unwired_methods_fail_explicitly() {
     for m in ["driver.status"] {
         assert_eq!(code(f.call(m, json!({})).await), ErrorCode::Internal, "{m}");
     }
-    assert_eq!(
-        code(f.call("node.test", json!({ "ids": [] })).await),
-        ErrorCode::KernelUnavailable
-    );
 }
 
 const TROJAN: &str = "trojan://hunter2-node-secret@tj.example.com:443?sni=tj.example.com#香港 01";
@@ -739,4 +740,5 @@ async fn mutating_calls_are_audited_without_their_params() {
     );
 }
 
+mod latency;
 mod nodes;

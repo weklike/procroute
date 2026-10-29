@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `node.*`：导入分享链接与订阅、列出节点。订阅的拉取与刷新见 [`super::subscription`]。
+//! `node.*`：导入分享链接与订阅、列出节点。订阅的拉取与刷新见 [`super::subscription`]，
+//! 测速见 [`super::latency`]。
 //!
 //! 解析在 `procroute-core-mgr::link`，支持范围以锁定的 sing-box 为准；这里负责去重、分配 id、
 //! 落盘（凭据经 DPAPI 加密，C-SEC-04）以及把节点映射成 IPC 类型。返回值与错误里不含凭据。
-//!
-//! 尚未接上、如实返回错误的：`node.test`（测速需要用户配置的测速地址，C-SEC-08、C-SEC-09）。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -71,13 +70,6 @@ pub(super) async fn list(svc: &Services, params: Value) -> Result<Value, IpcErro
         outbounds,
         subscriptions,
     })
-}
-
-pub(super) fn test(_svc: &Services, _params: Value) -> Result<Value, IpcError> {
-    Err(IpcError::new(
-        ErrorCode::KernelUnavailable,
-        "latency test needs a user-configured probe URL, which is not available in this build yet",
-    ))
 }
 
 /// 把解析结果并入已有节点：跳过重复项，遵守节点总数上限（C-SEC-07）。
