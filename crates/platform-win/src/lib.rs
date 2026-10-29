@@ -21,6 +21,7 @@
 //! - `library`：按哈希锁定的文件与按完整路径加载的已校验 DLL（C-DRV-01、C-DRV-02，仅 Windows）；
 //! - `job`：关闭即终止的作业对象，sing-box 随服务退出（T-056，C-NET-06，仅 Windows）；
 //! - `privileges`：服务启动后移除用不到的令牌特权（C-SEC-06，仅 Windows）；
+//! - `wfp`：TUN 模式 fail-closed 用的动态 WFP 过滤器（C-NET-03、C-NET-06，仅 Windows）；
 //! - `random`：系统 CSPRNG，生成每次启动的控制 API 密钥（T-056，C-NET-08，仅 Windows）。
 
 pub mod secret;
@@ -51,5 +52,7 @@ pub mod process;
 pub mod random;
 #[cfg(windows)]
 pub mod service;
+#[cfg(windows)]
+pub mod wfp;
 #[cfg(windows)]
 mod wide;
