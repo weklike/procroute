@@ -362,6 +362,19 @@ const enUS: Messages = {
     antiCheatHint:
       'Some anti-cheat software checks loaded drivers. If a game refuses to start, switch the profile to TUN mode, or stop the session and unload the driver.',
     themes: { system: 'System', light: 'Light', dark: 'Dark' },
+    autostart: 'Start at sign-in',
+    autostartHint: 'Starts in the tray after you sign in to Windows, without opening the window',
+  },
+  tray: {
+    tooltipIdle: 'ProcRoute: no session',
+    tooltipRunning: 'ProcRoute: {{name}}',
+    tooltipOffline: 'ProcRoute: cannot reach the service',
+    show: 'Show window',
+    start: 'Start session ({{name}})',
+    startNoProfile: 'Start session',
+    stop: 'Stop session',
+    profiles: 'Switch profile',
+    quit: 'Quit ProcRoute',
   },
 }
 

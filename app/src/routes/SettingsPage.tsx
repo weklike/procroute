@@ -10,7 +10,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import DriverPanel from '@/features/session/DriverPanel'
+import { useAutostart } from '@/features/shell/api'
 import { SUPPORTED_LANGUAGES, type Language } from '@/i18n'
 import { useUiStore, type Theme } from '@/stores/ui'
 
@@ -21,6 +23,7 @@ export default function SettingsPage() {
   const { t, i18n } = useTranslation()
   const theme = useUiStore((s) => s.theme)
   const setTheme = useUiStore((s) => s.setTheme)
+  const autostart = useAutostart()
   const language = (SUPPORTED_LANGUAGES as readonly string[]).includes(i18n.language)
     ? i18n.language
     : 'zh-CN'
@@ -65,6 +68,20 @@ export default function SettingsPage() {
             </SelectContent>
           </Select>
         </div>
+        {autostart.available ? (
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="settings-autostart">{t('settings.autostart')}</Label>
+              <p className="text-muted-foreground text-[13px]">{t('settings.autostartHint')}</p>
+            </div>
+            <Switch
+              id="settings-autostart"
+              checked={autostart.query.data ?? false}
+              disabled={autostart.query.isPending || autostart.mutation.isPending}
+              onCheckedChange={(enabled) => autostart.mutation.mutate(enabled)}
+            />
+          </div>
+        ) : null}
       </section>
       <DriverPanel />
     </>

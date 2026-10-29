@@ -10,7 +10,7 @@ import { useProfiles } from '@/features/profile/api'
 import { errorText } from '@/lib/errors'
 import { useUiStore } from '@/stores/ui'
 
-import { useSessionStatus, useStartSession, useStopSession } from './api'
+import { useSessionActivity, useSessionStatus, useStartSession, useStopSession } from './api'
 import BlockedBanner from './BlockedBanner'
 import ComponentChips from './ComponentChips'
 
@@ -21,11 +21,13 @@ export default function SessionBar() {
   const selected = useUiStore((s) => s.selectedProfileId)
   const start = useStartSession()
   const stop = useStopSession()
+  // 托盘菜单也能启停会话：进度与错误按共同的 mutation key 汇总
+  const activity = useSessionActivity()
   const s = status.data
   const list = profiles.data?.profiles ?? []
   const target = list.find((p) => p.id === selected) ?? list[0]
-  const busy = start.isPending || stop.isPending
-  const failure = start.error ?? stop.error ?? status.error
+  const busy = activity.busy
+  const failure = activity.error ?? status.error
 
   if (!s) {
     return (
@@ -55,7 +57,7 @@ export default function SessionBar() {
             onClick={() => stop.mutate()}
           >
             <Square aria-hidden="true" />
-            {s.state === 'stopping' || stop.isPending ? t('session.stopping') : t('session.stop')}
+            {s.state === 'stopping' || busy ? t('session.stopping') : t('session.stop')}
           </Button>
         ) : (
           <Button
@@ -64,7 +66,7 @@ export default function SessionBar() {
             onClick={() => target && start.mutate(target.id)}
           >
             <Play aria-hidden="true" />
-            {start.isPending ? t('session.starting') : t('session.start')}
+            {busy ? t('session.starting') : t('session.start')}
           </Button>
         )}
       </header>

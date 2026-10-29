@@ -5,7 +5,7 @@ import globals from 'globals'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  { ignores: ['dist', 'coverage', 'src/api/generated.ts'] },
+  { ignores: ['dist', 'coverage', 'src/api/generated.ts', 'src-tauri'] },
   js.configs.recommended,
   ...tseslint.configs.strict,
   {
@@ -47,6 +47,11 @@ export default tseslint.config(
               group: ['@/api/client', '**/api/client'],
               message:
                 '组件不能直接调用 IPC 客户端（C-CODE-09），请使用 features/<领域>/api.ts 里的 hook',
+            },
+            {
+              group: ['@/api/shell', '**/api/shell'],
+              message:
+                '组件不能直接调用外壳命令（C-CODE-09），请使用 features/shell/api.ts 里的 hook',
             },
           ],
         },

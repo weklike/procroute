@@ -336,6 +336,19 @@ const zhCN = {
     antiCheatHint:
       '部分游戏的反作弊会检查已加载的驱动。如果游戏无法启动，可以在方案里改用 TUN 分流模式，或停止会话后卸载驱动。',
     themes: { system: '跟随系统', light: '浅色', dark: '深色' },
+    autostart: '开机自启',
+    autostartHint: '登录 Windows 后在托盘中启动，不弹出主窗口',
+  },
+  tray: {
+    tooltipIdle: 'ProcRoute：未启动会话',
+    tooltipRunning: 'ProcRoute：{{name}}',
+    tooltipOffline: 'ProcRoute：无法连接到服务',
+    show: '显示主窗口',
+    start: '启动会话（{{name}}）',
+    startNoProfile: '启动会话',
+    stop: '停止会话',
+    profiles: '切换方案',
+    quit: '退出 ProcRoute',
   },
 }
 
