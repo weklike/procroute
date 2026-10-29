@@ -19,6 +19,7 @@ anyhow = "1.0.104"
 procroute-config = { path = "../config" }
 procroute-core-mgr = { path = "../core-mgr" }
 procroute-platform-win = { path = "../platform-win" }
+procroute-procwatch = { path = "../procwatch" }
 procroute-proto = { path = "../proto" }
 procroute-rules = { path = "../rules" }
 serde = "1.0.229"

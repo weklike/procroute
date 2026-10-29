@@ -5,29 +5,25 @@
 //! （过滤规则见 `procroute-platform-win::wfp`）。保护对象是目标进程的可执行文件：
 //!
 //! - 完整路径规则直接给出；
-//! - 名称、目录、通配、正则规则要看实际运行的进程：启动时扫一遍，之后每 [`RESCAN_INTERVAL`] 扫一次，
-//!   新出现的命中进程补上。**已知窗口**：内核不在、且命中进程刚启动还没被扫到的这段时间（最多一个扫描
-//!   间隔）没有保护；进程追踪（T-079，ETW）接入后可以消除。
+//! - 名称、目录、通配、正则规则要看实际运行的进程：由 `procroute-procwatch` 追踪（T-079），启动时快照
+//!   一遍，之后靠 ETW 进程事件（约 100 ms 延迟）补上新出现的命中进程；ETW 不可用时退回每 500 ms 一次快照。
+//!   **已知窗口**：内核不在、且命中进程刚启动、事件还没送到的这段时间没有保护。
 //!
-//! 排除规则命中的进程不保护（与路由判定一致）。丢弃句柄即关闭 WFP 会话，过滤器随之消失（C-NET-06）。
+//! 只保护自身命中规则的进程：TUN 模式按可执行文件分流，`include_children` 不生效，继承来的子进程本来就
+//! 不经 TUN，也就不阻断。排除规则命中的进程不保护（与路由判定一致）。丢弃句柄即关闭 WFP 会话，
+//! 过滤器随之消失（C-NET-06）。
 
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread::JoinHandle;
-use std::time::Duration;
 
 use procroute_core_mgr::config_gen::TUN_ADDRESSES;
-use procroute_platform_win::process::{list_processes, process_image_path};
 use procroute_platform_win::wfp::{FailClosedFilters, TunRanges};
+use procroute_procwatch::Change;
+use procroute_procwatch::watcher::{Options, Watcher};
 use procroute_proto::profile::{MatchType, Profile};
 use procroute_rules::engine::RuleEngine;
-use procroute_rules::matcher::NormalizedProcess;
 use procroute_rules::path::normalize_path;
-
-/// 补扫运行中进程的间隔。
-pub const RESCAN_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 为方案安装阻断。
 pub trait FailClosedGuard: Send + Sync + 'static {
@@ -41,96 +37,72 @@ pub trait GuardHandle: Send {
     fn stop(self: Box<Self>);
 }
 
-/// 正式实现：WFP 动态会话。
+/// 正式实现：WFP 动态会话 + 进程追踪。
 #[derive(Debug, Default)]
 pub struct WfpGuard;
 
 impl FailClosedGuard for WfpGuard {
     fn install(&self, profile: &Profile) -> Result<Box<dyn GuardHandle>, String> {
         let engine = RuleEngine::compile(profile).map_err(|e| e.to_string())?;
-        let filters = FailClosedFilters::open(tun_ranges()?).map_err(|e| e.to_string())?;
-        let mut tracker = Tracker {
-            engine,
-            filters,
+        let mut protector = Protector {
+            filters: FailClosedFilters::open(tun_ranges()?).map_err(|e| e.to_string())?,
             protected: HashSet::new(),
-            seen: HashSet::new(),
         };
         for path in path_rules(profile) {
-            tracker.protect_if_target("", &path);
+            protector.protect(&path);
         }
-        tracker.scan();
-        let (stop, stopped) = mpsc::channel::<()>();
-        let thread = std::thread::Builder::new()
-            .name("fail-closed-rescan".to_owned())
-            .spawn(move || {
-                // 收到停止信号或发送端被丢弃都结束；过滤器随 `tracker` 一起丢弃
-                while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(RESCAN_INTERVAL) {
-                    tracker.scan();
+        // 第一次快照在 start 里同步完成：返回时已运行的命中进程都已保护
+        let watcher = Watcher::start(engine, Options::default(), move |changes| {
+            for change in changes {
+                if let Change::Targeted {
+                    inherited: false,
+                    path: Some(path),
+                    ..
+                } = change
+                {
+                    protector.protect(path);
                 }
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(Box::new(Running { stop, thread }))
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(Box::new(Running { watcher }))
     }
 }
 
 struct Running {
-    stop: mpsc::Sender<()>,
-    thread: JoinHandle<()>,
+    /// 持有过滤器；停止追踪时随回调一起丢弃。
+    watcher: Watcher,
 }
 
 impl GuardHandle for Running {
     fn stop(self: Box<Self>) {
-        let _ = self.stop.send(());
-        let _ = self.thread.join();
+        self.watcher.stop();
     }
 }
 
-struct Tracker {
-    engine: RuleEngine,
+struct Protector {
     filters: FailClosedFilters,
     /// 已保护的可执行文件（规范化路径）。
     protected: HashSet<String>,
-    /// 已经判定过的进程（PID + 进程名），避免每轮都查路径。
-    seen: HashSet<(u32, String)>,
 }
 
-impl Tracker {
-    fn scan(&mut self) {
-        let Ok(processes) = list_processes() else {
-            return;
-        };
-        let current: HashSet<(u32, String)> =
-            processes.iter().map(|p| (p.pid, p.name.clone())).collect();
-        for p in &processes {
-            let key = (p.pid, p.name.clone());
-            if self.seen.contains(&key) {
-                continue;
-            }
-            if let Ok(path) = process_image_path(p.pid) {
-                self.protect_if_target(&p.name, &path);
-            }
-            self.seen.insert(key);
-        }
-        self.seen.retain(|k| current.contains(k));
-    }
-
-    /// 命中某个进程组（且没有被排除）的可执行文件装上过滤器。
-    fn protect_if_target(&mut self, name: &str, path: &str) {
-        let process = NormalizedProcess::new(name, path);
-        if self.engine.decide(&process).group().is_none() {
-            return;
-        }
+impl Protector {
+    fn protect(&mut self, path: &str) {
         let key = normalize_path(path);
         if self.protected.contains(&key) {
             return;
         }
+        let exe = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         match self.filters.protect(Path::new(path)) {
             Ok(()) => {
-                tracing::debug!(exe = %process.name, "fail-closed filters added");
+                tracing::debug!(exe = %exe, "fail-closed filters added");
                 self.protected.insert(key);
             }
-            // 文件不存在（规则里写的路径还没安装）等情况：之后进程真的运行时会被扫描补上
-            Err(e) => tracing::debug!(exe = %process.name, error = %e, "cannot protect executable"),
+            // 文件不存在（规则里写的路径还没安装）等情况：之后进程真的运行时会被追踪补上
+            Err(e) => tracing::debug!(exe = %exe, error = %e, "cannot protect executable"),
         }
     }
 }
