@@ -2848,6 +2848,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "procroute-procwatch"
+version = "0.1.0"
+dependencies = [
+ "procroute-platform-win",
+ "procroute-proto",
+ "procroute-rules",
+ "tracing",
+]
+
+[[package]]
 name = "procroute-proto"
 version = "0.1.0"
 dependencies = [
