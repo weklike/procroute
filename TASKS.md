@@ -44,9 +44,9 @@
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
 | M1 | T-050 ~ T-058、T-060 ~ T-062 | 在虚拟机里验证 TUN + `block` 的 WFP 阻断（`procroute-platform-win --features vm-tests`） |
-| M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074、T-079（ETW 部分待管理员终端验证，见下） | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
+| M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074、T-079 | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
 | M3 | T-090、T-092（中继嗅探 + 远程 DNS，见下）、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-095 的接线随 T-078 |
-| M4 | T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
+| M4 | T-112、T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
 
 偏离原计划的地方：
 
@@ -172,10 +172,25 @@
     不需要管理员）核对。`platform-win::process` 新增 `process_creation_time` 与核对创建时间的
     `process_image_path_checked`；快照里的路径展开 8.3 短名（C-DRV-04）。
   - 文件划分与原计划不同：ETW 的消费在 `platform-win::etw`，procwatch 里是 `tree.rs`、`snapshot.rs`、`watcher.rs`。
-  - **待验证**（管理员终端，开发机或虚拟机）：`cargo nextest run -p procroute-platform-win -p procroute-procwatch
-    --features admin-tests`，覆盖真实 ETW 事件、事件里的创建时间与 `GetProcessTimes` 一致、残留会话替换、1 秒内继承。
-    服务启动后会移除大部分令牌特权（只留 SeTcb / SeLoadDriver / SeChangeNotify / SeCreateGlobal），ETW 会话在
-    这种令牌下能否启动也要在虚拟机里看服务日志确认；启动不了时退回快照并记一条 warn，不影响功能。
+  - 管理员终端的测试（`cargo nextest run -p procroute-platform-win -p procroute-procwatch --features admin-tests`：
+    真实 ETW 事件、事件里的创建时间与 `GetProcessTimes` 一致、残留会话替换、1 秒内继承）2026-10-29 已全部通过。
+    **待验证**：服务启动后会移除大部分令牌特权（只留 SeTcb / SeLoadDriver / SeChangeNotify / SeCreateGlobal），
+    ETW 会话在这种令牌下能否启动要在虚拟机里看服务日志确认；启动不了时退回快照并记一条 warn，不影响功能。
+- T-112：新增读方法 `diag.export`（返回 `proto::diag::DiagReport`，新增方法，协议版本不变）。服务端
+  `svc::diag` 收集版本与系统信息（`platform-win::os` 读注册表里的系统版本与内存完整性开关）、安装目录里
+  sing-box 与版本锁的比对、会话状态、方案、节点概况和 `logs\svc.log` 末尾 512 KiB；任何一部分读不出只记进
+  `problems`，不影响导出。整份报告控制在一条 IPC 消息以内（C-SEC-03），超出时从最旧的日志行丢起。
+  - 脱敏（C-SEC-04，`svc::diag::redact`）：不导出凭据、订阅地址、节点名称与地址（只留端口），节点只列方案用到的，
+    其余按协议计数；日志逐行把登记过的节点地址 / TLS 服务器名 / 凭据 / 订阅地址换成占位符（短的只按整词），
+    凭据样式字段（与界面 `features/log/redact.ts` 同一组关键词）的值换成 `***`，公网 IP 换成 `<ip>`（回环、
+    私有、链路本地、100.64/10、198.18/15 保留），`\Users\<名字>` 换成 `<user>`；方案规则里的用户名同样处理，
+    远程 DNS 服务器只留协议。
+  - 保存：报告不经过 WebView。外壳命令 `diag_export`（`app/src-tauri/src/diag.rs`）调用 `diag.export`，加上界面
+    版本，以 `procroute-diag-<UTC 时间>.json` 新建在当前用户的「下载」文件夹（只新建、不覆盖），把路径交给界面
+    显示。没有用保存对话框：那需要新增 `tauri-plugin-dialog` 依赖（AGENTS 第 8 节第 2 条）。失败分「服务」与
+    「存盘」两类，界面分别提示。不在桌面外壳里时设置页不显示入口。
+  - 产出文件与原计划不同：除 `svc/src/diag.rs` 与 `features/settings/*` 外，还改了 proto、platform-win 与外壳。
+  - WinDivert 文件与锁的比对随 T-078（svc 接入 intercept）补上。
 
 ## 阶段 M0 — 脚手架与可跨平台内核（第 1–2 周）
 

@@ -40,14 +40,14 @@ crates/
   platform-win/  Windows API 封装：路径规范化、DPAPI、ACL、服务控制      [Windows；Secret<T> 跨平台]
   svc/           二进制：Windows 服务入口，唯一的组装点                 [Windows]
 app/
-  src-tauri/     Rust（包名 procroute-ui）：控制管道客户端 ipc.rs、窗口 / 托盘 / 开机自启 shell.rs（只依赖 proto）
+  src-tauri/     Rust（包名 procroute-ui）：控制管道客户端 ipc.rs、窗口 / 托盘 / 开机自启 shell.rs、诊断包存盘 diag.rs（只依赖 proto）
   src/           React 19 + TypeScript
     routes/        页面与路由定义（TanStack Router）
-    features/      按领域划分：session/ profile/ node/ conn/ log/，各自含 api.ts（Query hooks）与组件
+    features/      按领域划分：session/ profile/ node/ conn/ log/ shell/ settings/，各自含 api.ts（Query hooks）与组件
     components/    通用组件；components/ui/ 为 shadcn/ui 组件源码
     hooks/         通用 hooks，含 useIpcSubscription
     stores/        Zustand store（只放纯前端状态）
-    api/           generated.ts 由 gen-types 生成（禁止手改）；client.ts 为手写 IPC 薄封装；shell.ts 为外壳命令（托盘、自启、连接状态）薄封装
+    api/           generated.ts 由 gen-types 生成（禁止手改）；client.ts 为手写 IPC 薄封装；shell.ts 为外壳命令（托盘、自启、连接状态、诊断包导出）薄封装
     i18n/          zh-CN / en-US 文案资源
 third_party/
   windivert/     锁定版本的 dll/sys + SHA256 + LICENSE（只读）
