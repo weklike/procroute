@@ -2,10 +2,12 @@
 // 网络行为：出错时策略、DNS、UDP。
 // fail_policy 默认阻断，放行只能由用户在这里显式选择（C-NET-03）；
 // 接管系统 DNS 影响全局，选中前必须再次确认（C-NET-09）。
+// 远程 DNS 服务器由用户填写，不提供任何内置地址（C-SEC-09）。
 import { useState, type ReactNode } from 'react'
 import { useFormContext, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 
+import FieldError from '@/components/FieldError'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -15,6 +17,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 
 import type { ProfileForm } from './form'
 
@@ -34,8 +38,14 @@ function Option({ label, hint, children }: OptionProps) {
 
 export default function NetworkSettings() {
   const { t } = useTranslation()
-  const { register, control, setValue } = useFormContext<ProfileForm>()
+  const {
+    register,
+    control,
+    setValue,
+    formState: { errors },
+  } = useFormContext<ProfileForm>()
   const dns = useWatch({ control, name: 'dns.strategy' })
+  const remoteError = errors.dns?.remote_server?.message
   const [confirming, setConfirming] = useState(false)
   const radio = 'accent-brand mt-0.5 size-4'
 
@@ -74,6 +84,23 @@ export default function NetworkSettings() {
               onChange={() => setConfirming(true)}
             />
           </Option>
+          <div className="flex flex-col gap-1.5 text-[13px]">
+            <Label htmlFor="dns-remote-server">{t('profile.dns.remote')}</Label>
+            <Input
+              id="dns-remote-server"
+              className="font-mono text-[13px]"
+              placeholder={t('profile.dns.remotePlaceholder')}
+              spellCheck={false}
+              autoComplete="off"
+              aria-invalid={remoteError ? true : undefined}
+              aria-describedby={remoteError ? 'dns-remote-server-error' : 'dns-remote-server-hint'}
+              {...register('dns.remote_server')}
+            />
+            <span id="dns-remote-server-hint" className="text-muted-foreground">
+              {t('profile.dns.remoteHint')}
+            </span>
+            <FieldError id="dns-remote-server-error" message={remoteError} />
+          </div>
         </fieldset>
         <fieldset className="flex flex-col gap-2.5">
           <legend className="mb-1 text-[13px] font-semibold">{t('profile.udpLegend')}</legend>

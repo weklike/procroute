@@ -136,6 +136,8 @@ pub enum FieldIssueCode {
     NoMatchers,
     /// 匹配规则无法编译（正则、通配符语法错误等）。
     InvalidRule,
+    /// DNS 服务器地址格式不正确（`dns.remote_server`）。
+    InvalidDnsServer,
 }
 
 /// 某个字段上的一个问题。

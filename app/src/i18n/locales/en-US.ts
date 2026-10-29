@@ -130,6 +130,10 @@ const enUS: Messages = {
       confirmBody:
         'Every program on this computer will resolve names through ProcRoute, not only the target processes. The original DNS settings are restored when the session stops or the app exits.',
       confirm: 'Turn on',
+      remote: 'Remote DNS server (optional)',
+      remotePlaceholder: 'tls://dns.example or https://dns.example/dns-query',
+      remoteHint:
+        'Port 53 queries sent by the target processes are resolved by this server through the proxy, avoiding poisoned local answers; leave empty to keep them as they are',
     },
     udpLegend: 'UDP',
     udp: {
@@ -152,6 +156,7 @@ const enUS: Messages = {
       invalidTag: 'Lowercase letters, digits, - and _ only, up to 32 characters',
       duplicateTag: 'Duplicate group tag',
       noRules: 'Add at least one rule',
+      dnsServer: 'Use an address starting with udp://, tcp://, tls:// or https://',
     },
     issues: {
       schema_version: 'Unsupported profile version',
@@ -164,6 +169,7 @@ const enUS: Messages = {
       duplicate_tag: 'Duplicate group tag',
       no_matchers: 'Add at least one rule',
       invalid_rule: 'The rule cannot be parsed; check its syntax',
+      invalid_dns_server: 'The DNS server address is not valid',
     },
     add: {
       title: 'Add processes to group {{tag}}',

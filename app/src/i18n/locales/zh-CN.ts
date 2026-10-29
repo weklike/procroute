@@ -116,6 +116,9 @@ const zhCN = {
       confirmBody:
         '开启后，本机所有程序的 DNS 查询都会经过 ProcRoute，不只是目标进程。停止会话或退出程序时会自动恢复原来的 DNS 设置。',
       confirm: '确认开启',
+      remote: '远程 DNS 服务器（可选）',
+      remotePlaceholder: 'tls://dns.example 或 https://dns.example/dns-query',
+      remoteHint: '目标进程直发的 53 端口查询经代理交给它解析，绕开本地被污染的结果；留空则不接管',
     },
     udpLegend: 'UDP',
     udp: {
@@ -138,6 +141,7 @@ const zhCN = {
       invalidTag: '只能包含小写字母、数字、- 和 _，最多 32 个字符',
       duplicateTag: '组标签重复',
       noRules: '至少需要一条规则',
+      dnsServer: '请填写 udp://、tcp://、tls:// 或 https:// 开头的地址',
     },
     issues: {
       schema_version: '方案版本不受支持',
@@ -150,6 +154,7 @@ const zhCN = {
       duplicate_tag: '组标签重复',
       no_matchers: '至少需要一条规则',
       invalid_rule: '规则无法解析，请检查语法',
+      invalid_dns_server: 'DNS 服务器地址格式不正确',
     },
     add: {
       title: '添加进程到 {{tag}} 组',

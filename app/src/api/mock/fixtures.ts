@@ -12,7 +12,7 @@ export const PROFILES: Profile[] = [
     name: '游戏加速',
     mode: 'precise',
     fail_policy: 'block',
-    dns: { strategy: 'sniff', hijack_port53: true },
+    dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
     udp: { enabled: true, block_quic: false },
     groups: [
       {
@@ -45,7 +45,7 @@ export const PROFILES: Profile[] = [
     name: '浏览器分流',
     mode: 'precise',
     fail_policy: 'block',
-    dns: { strategy: 'sniff', hijack_port53: true },
+    dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
     udp: { enabled: true, block_quic: true },
     groups: [
       {
@@ -63,7 +63,7 @@ export const PROFILES: Profile[] = [
     name: '开发工具',
     mode: 'tun',
     fail_policy: 'block',
-    dns: { strategy: 'sniff', hijack_port53: true },
+    dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
     udp: { enabled: true, block_quic: false },
     groups: [
       {

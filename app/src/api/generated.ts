@@ -3,6 +3,8 @@
 
 export const IPC_PROTOCOL_VERSION = 1;
 
+export const PROFILE_SCHEMA_VERSION = 2;
+
 /**
  * 进入 `blocked` 的原因。只给原因码，文案由界面的 i18n 资源提供。
  */
@@ -45,7 +47,13 @@ export type DnsSettings = { strategy: DnsStrategy,
 /**
  * 劫持目标进程自己发往 53 端口的查询。
  */
-hijack_port53: boolean, };
+hijack_port53: boolean, 
+/**
+ * 远程 DNS 服务器（v2 起）：被劫持的查询经该进程组的出站交给它解析，绕开本地被污染的结果。
+ * 形如 `udp://`、`tcp://`、`tls://`、`https://` 地址，例如 `tls://198.51.100.53` 或
+ * `https://dns.example/dns-query`。由用户配置，软件不内置任何服务器（C-SEC-09）；为空时不劫持。
+ */
+remote_server: string | null, };
 
 /**
  * DNS 处理策略。
@@ -92,7 +100,7 @@ message: string, };
 /**
  * 字段校验问题的种类。界面按它从 i18n 资源取文案，并标到对应字段上。
  */
-export type FieldIssueCode = "schema_version" | "empty" | "too_long" | "too_many" | "invalid_id" | "invalid_tag" | "control_char" | "duplicate_tag" | "no_matchers" | "invalid_rule";
+export type FieldIssueCode = "schema_version" | "empty" | "too_long" | "too_many" | "invalid_id" | "invalid_tag" | "control_char" | "duplicate_tag" | "no_matchers" | "invalid_rule" | "invalid_dns_server";
 
 /**
  * 进程组：同一组的进程走同一个出站。

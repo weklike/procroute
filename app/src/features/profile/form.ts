@@ -3,10 +3,17 @@
 // 规则与 procroute-config 的校验保持一致，错误消息是 i18n 键。
 import { z } from 'zod'
 
-import type { MatchRule, MatchType, Profile } from '@/api/generated'
+import {
+  PROFILE_SCHEMA_VERSION,
+  type MatchRule,
+  type MatchType,
+  type Profile,
+} from '@/api/generated'
 
 export const MAX_NAME = 64
 const TAG = /^[a-z0-9_-]{1,32}$/
+/** 粗查远程 DNS 地址的协议与长度；完整的格式检查以服务端（procroute-config::dns）为准。 */
+const DNS_SERVER = /^(udp|tcp|tls|https):\/\/[^\s@?#]{1,248}$/i
 
 export const MATCH_TYPES = ['name', 'path', 'dir', 'glob', 'regex'] as const satisfies MatchType[]
 
@@ -37,6 +44,13 @@ export const profileSchema = z
     dns: z.object({
       strategy: z.enum(['sniff', 'system_takeover']),
       hijack_port53: z.boolean(),
+      // 输入框里的空串表示不使用远程 DNS
+      remote_server: z
+        .string()
+        .trim()
+        .nullable()
+        .transform((v) => (v ? v : null))
+        .refine((v) => v === null || DNS_SERVER.test(v), 'profile.validation.dnsServer'),
     }),
     udp: z.object({ enabled: z.boolean(), block_quic: z.boolean() }),
     groups: z.array(groupSchema),
@@ -66,12 +80,12 @@ void sameShape
 /** 新方案：所有安全相关的选项取默认值（fail-closed、DNS 嗅探，C-NET-03、C-NET-09）。 */
 export function newProfile(name: string): Profile {
   return {
-    schema_version: 1,
+    schema_version: PROFILE_SCHEMA_VERSION,
     id: '',
     name,
     mode: 'precise',
     fail_policy: 'block',
-    dns: { strategy: 'sniff', hijack_port53: true },
+    dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
     udp: { enabled: true, block_quic: false },
     groups: [],
     exclude: [],

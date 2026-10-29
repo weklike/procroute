@@ -23,7 +23,7 @@ const PROFILE: Profile = {
   name: '游戏加速',
   mode: 'precise',
   fail_policy: 'block',
-  dns: { strategy: 'sniff', hijack_port53: true },
+  dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
   udp: { enabled: true, block_quic: false },
   groups: [
     {
@@ -122,7 +122,42 @@ describe('ProfileEditor', () => {
     await user.click(screen.getByRole('button', { name: '保存方案' }))
     await waitFor(() =>
       expect(saveSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ dns: { strategy: 'system_takeover', hijack_port53: true } }),
+        expect.objectContaining({
+          dns: { strategy: 'system_takeover', hijack_port53: true, remote_server: null },
+        }),
+      ),
+    )
+  })
+
+  it('checks the remote DNS server and saves it, or null when empty', async () => {
+    const user = userEvent.setup()
+    const { saveSpy } = setup((p) => ({ id: p.id }))
+    const field = screen.getByLabelText('远程 DNS 服务器（可选）')
+
+    await user.type(field, 'dns.example')
+    await user.click(screen.getByRole('button', { name: '保存方案' }))
+    expect(
+      await screen.findByText('请填写 udp://、tcp://、tls:// 或 https:// 开头的地址'),
+    ).toBeInTheDocument()
+    expect(field).toHaveAttribute('aria-invalid', 'true')
+    expect(saveSpy).not.toHaveBeenCalled()
+
+    await user.clear(field)
+    await user.type(field, ' tls://198.51.100.53:853 ')
+    await user.click(screen.getByRole('button', { name: '保存方案' }))
+    await waitFor(() =>
+      expect(saveSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          dns: expect.objectContaining({ remote_server: 'tls://198.51.100.53:853' }),
+        }),
+      ),
+    )
+
+    await user.clear(field)
+    await user.click(screen.getByRole('button', { name: '保存方案' }))
+    await waitFor(() =>
+      expect(saveSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ dns: expect.objectContaining({ remote_server: null }) }),
       ),
     )
   })
