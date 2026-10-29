@@ -5,7 +5,7 @@
 //!   推给所有已握手的连接（`session.status` 事件，C-UI-02 要求界面如实显示）；
 //! - 日志与连接事件走 `broadcast`：只发给调用过 `log.subscribe` / `conn.subscribe` 的连接。
 //!   某个连接处理不过来时丢弃它落下的事件（界面本来就只显示最近的若干条），不拖慢服务。
-//!   连接事件的来源（中继与拦截层）随 M2 接入。
+//!   连接事件目前来自 TUN 模式下内核的连接列表（`conn_watch`）；精确模式的来源（中继）随 M2 接入。
 
 use procroute_proto::event::{ConnEvent, LogEvent};
 use procroute_proto::session::SessionStatus;
@@ -18,13 +18,6 @@ pub const STREAM_CAPACITY: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
     Log(LogEvent),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "连接事件的生产者（中继、拦截层）随 M2 接入，届时去掉"
-        )
-    )]
     Conn(ConnEvent),
 }
 
@@ -72,6 +65,11 @@ impl EventHub {
     }
 
     /// 高频事件的发送端（测试里用它直接发事件）。
+    /// 推送一条连接事件；没有订阅者时直接丢弃。
+    pub fn publish_conn(&self, event: ConnEvent) {
+        let _ = self.stream.send(StreamEvent::Conn(event));
+    }
+
     #[cfg(test)]
     pub fn stream_sender(&self) -> broadcast::Sender<StreamEvent> {
         self.stream.clone()

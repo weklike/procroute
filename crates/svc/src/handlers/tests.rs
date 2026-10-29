@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use super::*;
 use crate::client_auth::ClientAuth;
 use crate::ipc_server::{Caller, ServerConfig, serve};
-use crate::kernel::StateCallback;
+use crate::kernel::{RunningKernel, StateCallback};
 use crate::node_store::NodeStore;
 use crate::store::tests::sample;
 

@@ -10,6 +10,7 @@
 //!   随之撤销，目标进程会回落直连，无法满足 C-NET-03，返回 `session.fail_closed_unsupported`。
 //!   要支持它，需要一个不依赖 sing-box 存活的阻断手段（见 TASKS.md）。
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,9 +27,16 @@ use procroute_proto::session::{
 use serde_json::Value;
 
 use super::{Services, blocking, node, store_error, to_json};
+use crate::conn_watch::{Classifier, ConnWatch, POLL_INTERVAL};
 use crate::events::EventHub;
 use crate::ipc_server::parse_params;
 use crate::kernel::{RunningKernel, StateCallback};
+
+/// 运行中的会话：内核，以及 TUN 模式下读取内核连接列表的轮询（连接面板）。
+pub(super) struct RunningSession {
+    kernel: Box<dyn RunningKernel>,
+    conn_watch: Option<ConnWatch>,
+}
 
 /// 服务刚启动时的状态：服务在运行，驱动与内核未启动（C-UI-02 要求如实显示）。
 pub(super) fn initial_status() -> SessionStatus {
@@ -58,7 +66,7 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
     }
     // 上一个会话的内核超出重启上限后，守护已经结束，这里只做收尾
     if let Some(stale) = slot.take() {
-        stop_kernel(stale).await;
+        stop_session(stale).await;
     }
     let store = svc.profiles.clone();
     let profile = blocking(move || store.get(&profile_id).map_err(store_error)).await?;
@@ -75,11 +83,25 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
     );
     let launcher = svc.launcher.clone();
     let api = SocketAddr::from((Ipv4Addr::LOCALHOST, config.api_port));
-    let launched =
-        tokio::task::spawn_blocking(move || launcher.launch(config.text, api, on_state)).await;
+    let text = config.text;
+    let launched = tokio::task::spawn_blocking(move || launcher.launch(text, api, on_state)).await;
     match launched {
         Ok(Ok(kernel)) => {
-            *slot = Some(kernel);
+            let conn_watch = match Classifier::new(&profile, config.node_names) {
+                Ok(classifier) => Some(ConnWatch::spawn(
+                    svc.hub.clone(),
+                    api,
+                    config.api_secret,
+                    classifier,
+                    POLL_INTERVAL,
+                )),
+                Err(e) => {
+                    // 方案已通过校验，不会走到这里；连接面板没有数据，会话照常运行
+                    tracing::error!(error = %e, "cannot attribute connections");
+                    None
+                }
+            };
+            *slot = Some(RunningSession { kernel, conn_watch });
             let status = svc.hub.update_session(|s| {
                 s.state = SessionState::Running;
                 s.components.kernel = ComponentState::Active;
@@ -122,8 +144,8 @@ pub(super) async fn stop(svc: &Services, params: Value) -> Result<Value, IpcErro
     // 先作废旧会话的回调，停止过程中守护上报的状态不再改写会话
     svc.epoch.fetch_add(1, Ordering::SeqCst);
     svc.hub.update_session(|s| s.state = SessionState::Stopping);
-    if let Some(kernel) = slot.take() {
-        stop_kernel(kernel).await;
+    if let Some(running) = slot.take() {
+        stop_session(running).await;
     }
     let status = svc.hub.update_session(|s| *s = initial_status());
     tracing::info!("session stopped");
@@ -134,12 +156,17 @@ pub(super) async fn stop(svc: &Services, params: Value) -> Result<Value, IpcErro
 pub(super) async fn shutdown(svc: &Services) {
     let mut slot = svc.kernel.lock().await;
     svc.epoch.fetch_add(1, Ordering::SeqCst);
-    if let Some(kernel) = slot.take() {
-        stop_kernel(kernel).await;
+    if let Some(running) = slot.take() {
+        stop_session(running).await;
     }
 }
 
-async fn stop_kernel(kernel: Box<dyn RunningKernel>) {
+/// 先停连接轮询（为剩余连接发「已关闭」），再停内核。
+async fn stop_session(running: RunningSession) {
+    if let Some(watch) = running.conn_watch {
+        watch.stop().await;
+    }
+    let kernel = running.kernel;
     if let Err(e) = tokio::task::spawn_blocking(move || kernel.stop()).await {
         tracing::error!(error = %e, "stopping the kernel failed");
     }
@@ -163,12 +190,20 @@ fn check_supported(profile: &Profile) -> Result<(), IpcError> {
 struct TunConfig {
     text: procroute_platform_win::secret::Secret<String>,
     api_port: u16,
+    /// 控制 API 密钥，连接轮询要用。
+    api_secret: procroute_platform_win::secret::Secret<String>,
+    /// 节点 id（出站标签）→ 节点名，连接面板显示用。
+    node_names: HashMap<String, String>,
 }
 
 /// 生成本次启动的 sing-box 配置：节点按 id 作为出站标签，控制 API 用随机端口与密钥（C-NET-08）。
 async fn tun_config(svc: &Services, profile: &Profile) -> Result<TunConfig, IpcError> {
     let nodes = svc.nodes.clone();
     let stored = blocking(move || nodes.load().map_err(node::storage_error)).await?;
+    let node_names = stored
+        .iter()
+        .map(|n| (n.id.clone(), n.name.clone()))
+        .collect();
     let outbounds: Vec<NodeOutbound> = stored
         .into_iter()
         .map(|n| NodeOutbound {
@@ -183,11 +218,16 @@ async fn tun_config(svc: &Services, profile: &Profile) -> Result<TunConfig, IpcE
         random_api_secret().map_err(|e| IpcError::new(ErrorCode::Internal, e.to_string()))?;
     let runtime = Runtime {
         api_port,
-        api_secret,
+        api_secret: api_secret.clone(),
         self_exe_paths: svc.self_exe_paths.clone(),
     };
     let text = generate_tun(profile, &outbounds, &[], &runtime).map_err(gen_error)?;
-    Ok(TunConfig { text, api_port })
+    Ok(TunConfig {
+        text,
+        api_port,
+        api_secret,
+        node_names,
+    })
 }
 
 /// 生成错误的文本只含标签与规则位置，不含凭据，可以直接带给界面。

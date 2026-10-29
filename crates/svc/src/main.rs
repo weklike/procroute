@@ -20,6 +20,8 @@ compile_error!(
 #[cfg(windows)]
 mod client_auth;
 #[cfg(windows)]
+mod conn_watch;
+#[cfg(windows)]
 mod events;
 #[cfg(windows)]
 mod handlers;

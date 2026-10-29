@@ -18,7 +18,7 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::events::{EventHub, StreamEvent, Subscription};
 use crate::ipc_server::{Call, Handler};
-use crate::kernel::{KernelLauncher, RunningKernel};
+use crate::kernel::KernelLauncher;
 use crate::node_store::NodeStore;
 use crate::store::{ProfileStore, StoreError};
 
@@ -34,7 +34,7 @@ pub struct Services {
     hub: Arc<EventHub>,
     launcher: Arc<dyn KernelLauncher>,
     /// 运行中的内核。启动与停止都持有这把锁，彼此互斥。
-    kernel: Mutex<Option<Box<dyn RunningKernel>>>,
+    kernel: Mutex<Option<session::RunningSession>>,
     /// 当前会话的编号；旧会话的内核回调发现编号变了就不再改写状态。
     epoch: Arc<AtomicU64>,
     /// ProcRoute 自身的可执行文件，永久直连（C-NET-05）。
