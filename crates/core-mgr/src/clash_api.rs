@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! sing-box 控制 API（Clash API）客户端：目前只读当前连接列表，供 TUN 模式的连接面板使用（F10）。
+//! sing-box 控制 API（Clash API）客户端：读当前连接列表（TUN 模式的连接面板，F10）与节点测速（`node.test`）。
 //!
 //! 只连接 127.0.0.1 上的控制 API，带每次启动随机生成的密钥（C-NET-08）。请求是手写的最小 HTTP/1.0 GET：
 //! 用 1.0 是为了让服务端以关闭连接作为响应结束，不必处理分块编码；不为此引入 HTTP 库（C-DEP-03）。
@@ -56,6 +56,8 @@ pub enum ApiError {
     Malformed,
     #[error("response from the control API exceeds {MAX_RESPONSE_BYTES} bytes")]
     TooLarge,
+    #[error("the latency test URL must start with https://")]
+    InsecureProbeUrl,
 }
 
 /// 读取当前连接列表。
@@ -113,6 +115,66 @@ fn split_response(response: Vec<u8>) -> Result<Vec<u8>, ApiError> {
         return Err(ApiError::Status(status));
     }
     Ok(response[header_end + 4..].to_vec())
+}
+
+/// 一次测速的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delay {
+    /// 往返耗时（毫秒）。
+    Ms(u32),
+    /// 在限定时间内没有完成。
+    TimedOut,
+    /// 连不上或出错。
+    Failed,
+}
+
+/// 经出站 `tag` 访问 `url` 并计时（`GET /proxies/{tag}/delay`）。`timeout` 是内核测速的超时，
+/// 读取响应时多等 2 秒。`url` 必须由用户配置（C-SEC-08、C-SEC-09）。
+///
+/// `url` 必须以 `https://` 开头：锁定版本的 sing-box 在这个接口上会把 `http://` 开头的地址悄悄换成
+/// 它内置的默认测速地址（2026-10-29 实测），那样既不是用户选的地址，也违反 C-SEC-09。
+pub fn fetch_delay(
+    addr: SocketAddr,
+    secret: &Secret<String>,
+    tag: &str,
+    url: &str,
+    timeout: Duration,
+) -> Result<Delay, ApiError> {
+    if !url.starts_with("https://") {
+        return Err(ApiError::InsecureProbeUrl);
+    }
+    let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+    let path = format!(
+        "/proxies/{}/delay?timeout={ms}&url={}",
+        encode_component(tag),
+        encode_component(url)
+    );
+    match get(addr, &path, secret, timeout + Duration::from_secs(2)) {
+        Ok(body) => {
+            let v: Value = serde_json::from_slice(&body).map_err(|_| ApiError::Malformed)?;
+            match v.get("delay").and_then(Value::as_u64) {
+                Some(0) | None => Ok(Delay::Failed),
+                Some(ms) => Ok(Delay::Ms(u32::try_from(ms).unwrap_or(u32::MAX))),
+            }
+        }
+        // 内核的约定：超时回 504，测速失败回 503
+        Err(ApiError::Status(504 | 408)) => Ok(Delay::TimedOut),
+        Err(ApiError::Status(503)) => Ok(Delay::Failed),
+        Err(e) => Err(e),
+    }
+}
+
+/// 百分号编码 URL 的一个组成部分：只保留 RFC 3986 的非保留字符。
+fn encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// 解析 `GET /connections` 的响应体。字段缺失时取空值，单条连接解析不了就跳过。
@@ -344,6 +406,82 @@ mod tests {
             s.write_all(response).expect("write");
         });
         (addr, rx)
+    }
+
+    #[test]
+    fn delay_requests_are_encoded_and_answers_mapped() {
+        let (addr, rx) = fake_api(b"HTTP/1.1 200 OK\r\n\r\n{\"delay\":123}");
+        let d = fetch_delay(
+            addr,
+            &secret(),
+            "n1a2-0",
+            "https://probe.example/gen 204?a=1&b=2",
+            Duration::from_secs(1),
+        )
+        .expect("delay");
+        assert_eq!(d, Delay::Ms(123));
+        let request = rx.recv().expect("request");
+        assert!(
+            request.starts_with(
+                "GET /proxies/n1a2-0/delay?timeout=1000&url=https%3A%2F%2Fprobe.example%2Fgen%20204%3Fa%3D1%26b%3D2 HTTP/1.0\r\n"
+            ),
+            "{request}"
+        );
+        let (addr, _rx) = fake_api(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n{}");
+        assert!(matches!(
+            fetch_delay(
+                addr,
+                &secret(),
+                "n",
+                "https://x.example",
+                Duration::from_secs(1)
+            ),
+            Ok(Delay::TimedOut)
+        ));
+        let (addr, _rx) = fake_api(b"HTTP/1.1 503 Service Unavailable\r\n\r\n{}");
+        assert!(matches!(
+            fetch_delay(
+                addr,
+                &secret(),
+                "n",
+                "https://x.example",
+                Duration::from_secs(1)
+            ),
+            Ok(Delay::Failed)
+        ));
+        let (addr, _rx) = fake_api(b"HTTP/1.1 404 Not Found\r\n\r\n{}");
+        assert!(matches!(
+            fetch_delay(
+                addr,
+                &secret(),
+                "n",
+                "https://x.example",
+                Duration::from_secs(1)
+            ),
+            Err(ApiError::Status(404))
+        ));
+    }
+
+    #[test]
+    fn plain_http_probe_urls_are_refused_before_asking_the_kernel() {
+        // 没有服务在监听：被拒绝的请求根本不会发出
+        let addr = SocketAddr::from(([127, 0, 0, 1], 9));
+        for url in [
+            "http://probe.example/204",
+            "HTTP://probe.example/204",
+            "ftp://x",
+        ] {
+            assert!(matches!(
+                fetch_delay(addr, &secret(), "n", url, Duration::from_secs(1)),
+                Err(ApiError::InsecureProbeUrl)
+            ));
+        }
+    }
+
+    #[test]
+    fn components_are_percent_encoded() {
+        assert_eq!(encode_component("a-Z_0.9~"), "a-Z_0.9~");
+        assert_eq!(encode_component("a b/中"), "a%20b%2F%E4%B8%AD");
     }
 
     fn secret() -> Secret<String> {

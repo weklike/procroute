@@ -281,6 +281,41 @@ pub fn generate_precise(
     Ok(Secret::new(format!("{config:#}")))
 }
 
+/// 测速用的内核配置（`node.test`）：只有直连与给定节点的出站和控制 API，**没有任何入站**，不建 TUN、
+/// 不监听代理端口，不影响系统网络。出站标签就是 [`NodeOutbound::tag`]，测速经控制 API 按标签进行。
+pub fn generate_probe(
+    nodes: &[NodeOutbound],
+    runtime: &Runtime,
+) -> Result<Secret<String>, GenError> {
+    check_secret(runtime.api_port, runtime.api_secret.expose(), "控制 API")?;
+    let mut outbounds = vec![json!({ "type": "direct", "tag": DIRECT_TAG })];
+    let mut seen = HashSet::new();
+    for n in nodes {
+        if n.tag == DIRECT_TAG || !seen.insert(n.tag.as_str()) {
+            return Err(GenError::DuplicateTag(n.tag.clone()));
+        }
+        let value = outbound::render(&n.tag, &n.node, &n.credentials).map_err(|source| {
+            GenError::InvalidNode {
+                tag: n.tag.clone(),
+                source,
+            }
+        })?;
+        outbounds.push(value);
+    }
+    let config = json!({
+        "log": log_options(),
+        "dns": dns::section(None, Vec::new()),
+        "outbounds": outbounds,
+        "route": {
+            "final": DIRECT_TAG,
+            "auto_detect_interface": true,
+            "default_domain_resolver": LOCAL_DNS_TAG,
+        },
+        "experimental": clash_api(runtime),
+    });
+    Ok(Secret::new(format!("{config:#}")))
+}
+
 fn log_options() -> Value {
     json!({ "level": "warn", "timestamp": true })
 }

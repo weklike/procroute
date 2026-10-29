@@ -185,6 +185,43 @@ fn control_api_lists_connections() {
 }
 
 #[test]
+fn control_api_measures_delay_through_an_outbound() {
+    use std::io::Read;
+
+    // 本机的监听端口充当测速地址，经内置的 direct 出站访问：请求不出本机。这里不是 TLS 服务器，
+    // 握手失败即测速失败；要验证的是内核确实连到了**给定的**地址（收到 TLS ClientHello），
+    // 而不是它内置的默认测速地址
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    let (hello_tx, hello_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = probe.accept() {
+            let mut first = [0u8; 1];
+            let _ = s.read_exact(&mut first);
+            let _ = hello_tx.send(first[0]);
+        }
+    });
+    let api = api_addr();
+    let (sup, rx) = start(launch("delay", api, idle_config(api)), fast_policy());
+    running_pid(&rx);
+    let delay = crate::clash_api::fetch_delay(
+        api,
+        &Secret::new(SECRET.to_owned()),
+        "direct",
+        &format!("https://127.0.0.1:{port}/generate_204"),
+        Duration::from_secs(3),
+    )
+    .expect("delay");
+    assert_eq!(delay, crate::clash_api::Delay::Failed);
+    assert_eq!(
+        hello_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(0x16),
+        "the kernel did not connect to the given URL"
+    );
+    sup.stop();
+}
+
+#[test]
 fn hash_mismatch_refuses_to_start() {
     let api = api_addr();
     let mut l = launch("hash", api, idle_config(api));

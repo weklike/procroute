@@ -746,3 +746,5 @@ mod sing_box_check {
 }
 
 mod dns;
+
+mod probe;
