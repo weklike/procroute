@@ -43,6 +43,105 @@ export type ConnPhase = "opened" | "updated" | "closed";
  */
 export type CredentialState = "set" | "not_set";
 
+/**
+ * 运行环境与组件版本。
+ */
+export type DiagEnvironment = { service_version: string, protocol_version: number, 
+/**
+ * 例如 `10.0.26100.2314`。
+ */
+os_build: string | null, 
+/**
+ * 例如 `24H2`。
+ */
+os_display_version: string | null, 
+/**
+ * 内存完整性（HVCI）的配置开关，影响拦截驱动能否加载；从未配置时为空。
+ */
+memory_integrity: boolean | null, 
+/**
+ * 锁定的 sing-box 版本。
+ */
+kernel_version: string | null, 
+/**
+ * 安装目录里的 sing-box 与版本锁的比对结果。
+ */
+kernel_binary: DiagFileState, };
+
+/**
+ * 第三方二进制与版本锁的比对结果。
+ */
+export type DiagFileState = "verified" | "missing" | "mismatch" | "unreadable" | "unknown";
+
+/**
+ * 服务日志的末尾部分。
+ */
+export type DiagLog = { 
+/**
+ * 是否有日志文件。控制台模式下日志写到终端，没有文件。
+ */
+available: boolean, 
+/**
+ * 只取了文件末尾的一部分。
+ */
+truncated: boolean, 
+/**
+ * 脱敏后的日志行，从旧到新。
+ */
+lines: Array<string>, };
+
+export type DiagNode = { id: string, protocol: NodeProtocol, 
+/**
+ * 服务器端口；地址本身不导出。
+ */
+server_port: number, credential: CredentialState, subscription_id: string | null, };
+
+/**
+ * 节点概况，不含名称、地址与凭据。节点可能有上千个，只列出方案用到的，其余只计数。
+ */
+export type DiagNodes = { total: number, 
+/**
+ * 各协议的节点数，从多到少。
+ */
+protocols: Array<DiagProtocolCount>, 
+/**
+ * 方案里的进程组引用到的节点。
+ */
+referenced: Array<DiagNode>, 
+/**
+ * 方案引用了、但不存在的出站标签（会话因此无法启动）。
+ */
+missing_outbounds: Array<string>, subscriptions: Array<DiagSubscription>, };
+
+export type DiagProtocolCount = { protocol: NodeProtocol, count: number, };
+
+/**
+ * `diag.export` 的返回值。
+ */
+export type DiagReport = { 
+/**
+ * 生成时间，Unix 毫秒。
+ */
+generated_at_ms: number, environment: DiagEnvironment, session: SessionStatus, 
+/**
+ * 全部方案。规则里的用户目录名与远程 DNS 服务器地址已脱敏。
+ */
+profiles: Array<Profile>, 
+/**
+ * 节点概况；`nodes.json` 读不出时为空，原因见 `problems`。
+ */
+nodes: DiagNodes | null, log: DiagLog, 
+/**
+ * 收集过程中遇到的问题，稳定的 `snake_case` 代码（例如 `node_store_unreadable`）。
+ * 某一部分失败不影响其余部分的导出。
+ */
+problems: Array<string>, };
+
+/**
+ * 订阅概况，不含名称与地址（地址常含令牌）。
+ */
+export type DiagSubscription = { id: string, node_count: number, updated_at_ms: number | null, };
+
 export type DnsSettings = { strategy: DnsStrategy, 
 /**
  * 劫持目标进程自己发往 53 端口的查询。
@@ -361,6 +460,7 @@ export interface IpcRequest {
   "log.subscribe": LogSubscribeParams;
   "driver.status": Empty;
   "driver.unload": Empty;
+  "diag.export": Empty;
 }
 
 /** 方法名 → 返回值类型 */
@@ -381,6 +481,7 @@ export interface IpcResult {
   "log.subscribe": Empty;
   "driver.status": DriverStatus;
   "driver.unload": DriverStatus;
+  "diag.export": DiagReport;
 }
 
 /** 事件通道 → 负载类型 */

@@ -302,6 +302,24 @@ export function createMockService(): MockService {
       if (session.state !== 'stopped') fail('driver.busy', 'session is running')
       return { state: 'inactive', version: '2.2.2' }
     },
+    // 只为类型完整：界面经外壳的 `diag_export` 导出，浏览器里不显示导出入口
+    'diag.export': () => ({
+      generated_at_ms: Date.now(),
+      environment: {
+        service_version: '0.1.0-mock',
+        protocol_version: 1,
+        os_build: null,
+        os_display_version: null,
+        memory_integrity: null,
+        kernel_version: null,
+        kernel_binary: 'unknown',
+      },
+      session,
+      profiles,
+      nodes: null,
+      log: { available: false, truncated: false, lines: [] },
+      problems: [],
+    }),
   }
 
   return {

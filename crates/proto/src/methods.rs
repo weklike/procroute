@@ -7,6 +7,7 @@
 use ts_rs::{Config, TS, TypeVisitor};
 
 use crate::Empty;
+use crate::diag::DiagReport;
 use crate::event::{ConnEvent, DriverStatus, LogEvent, LogSubscribeParams, ProcessListResult};
 use crate::node::{
     NodeImportParams, NodeImportResult, NodeListResult, NodeTestParams, NodeTestResult,
@@ -84,6 +85,7 @@ ipc_methods! {
     "log.subscribe" => LogSubscribeParams, Empty, read;
     "driver.status" => Empty, DriverStatus, read;
     "driver.unload" => Empty, DriverStatus, write;
+    "diag.export" => Empty, DiagReport, read;
 }
 
 ipc_events! {
