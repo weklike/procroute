@@ -1,50 +1,93 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! 各领域的 IPC 处理函数（T-058）。
 //!
-//! 已接上：`session.status` / `session.stop`、`profile.*`、`node.import`（分享链接）/ `node.list`。
-//! 尚未接上、如实返回错误而不假装成功的：
-//! - `session.start`：配置生成已就绪（T-055），还需要 sing-box 子进程守护（T-056）；
-//! - `node.import` 的订阅拉取与 `node.test`：见 [`node`] 模块文档；
-//! - `process.list`、`conn.subscribe`、`log.subscribe`、`driver.*`：随 M2 的各模块接入。
+//! 已接上：`session.*`（TUN 模式，见 [`session`] 模块文档）、`profile.*`、
+//! `node.import`（分享链接与订阅）/ `node.list` / `node.test`（见 [`latency`]）、`process.list`、
+//! `diag.export`（见 [`crate::diag`]）。
+//! `conn.subscribe` / `log.subscribe` 由管道服务端处理。
+//! 尚未接上、如实返回错误而不假装成功的：`driver.*`，随 M2 的拦截后端接入。
 
-use std::sync::Mutex;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use procroute_proto::error::{ErrorCode, IpcError};
 use procroute_proto::session::SessionStatus;
 use serde::Serialize;
 use serde_json::Value;
+use tokio::sync::{Mutex, broadcast};
 
+use crate::diag::DiagSources;
+use crate::events::{EventHub, StreamEvent, Subscription};
+use crate::fail_closed::FailClosedGuard;
 use crate::ipc_server::{Call, Handler};
+use crate::kernel::KernelLauncher;
 use crate::node_store::NodeStore;
 use crate::store::{ProfileStore, StoreError};
 
+mod diag;
+mod latency;
 mod node;
+mod process;
 mod profile;
 mod session;
+mod subscription;
 
 /// 服务的全部状态，由 IPC 服务端共享。
 pub struct Services {
     profiles: ProfileStore,
     nodes: NodeStore,
-    session: Mutex<SessionStatus>,
+    /// 会话状态与推送事件；会话状态只存在这里。
+    hub: Arc<EventHub>,
+    launcher: Arc<dyn KernelLauncher>,
+    /// TUN 模式 `block` 策略的阻断（C-NET-03）。
+    guard: Arc<dyn FailClosedGuard>,
+    /// 运行中的内核。启动与停止都持有这把锁，彼此互斥。
+    kernel: Mutex<Option<session::RunningSession>>,
+    /// 当前会话的编号；旧会话的内核回调发现编号变了就不再改写状态。
+    epoch: Arc<AtomicU64>,
+    /// ProcRoute 自身的可执行文件，永久直连（C-NET-05）。
+    self_exe_paths: Vec<String>,
+    /// 诊断包要读的日志与内核文件。
+    diag: DiagSources,
 }
 
 impl Services {
-    pub fn new(profiles: ProfileStore, nodes: NodeStore) -> Self {
+    /// `stream` 是日志与连接事件的发送端：日志层在服务状态之前创建，两者共用。
+    pub fn new(
+        profiles: ProfileStore,
+        nodes: NodeStore,
+        stream: broadcast::Sender<StreamEvent>,
+        launcher: Arc<dyn KernelLauncher>,
+        guard: Arc<dyn FailClosedGuard>,
+        self_exe_paths: Vec<String>,
+    ) -> Self {
         Self {
             profiles,
             nodes,
-            session: Mutex::new(session::initial_status()),
+            hub: Arc::new(EventHub::with_stream(session::initial_status(), stream)),
+            launcher,
+            guard,
+            kernel: Mutex::new(None),
+            epoch: Arc::new(AtomicU64::new(0)),
+            self_exe_paths,
+            diag: DiagSources::default(),
         }
     }
 
-    /// 当前会话状态的副本。锁只在拷贝期间持有。
+    /// 告诉诊断包日志文件与内核文件在哪里（默认都没有）。
+    pub fn with_diagnostics(mut self, sources: DiagSources) -> Self {
+        self.diag = sources;
+        self
+    }
+
+    /// 服务退出前停止会话。
+    pub async fn shutdown(&self) {
+        session::shutdown(self).await;
+    }
+
+    /// 当前会话状态的副本。
     fn session_snapshot(&self) -> SessionStatus {
-        match self.session.lock() {
-            Ok(s) => s.clone(),
-            // 持锁线程 panic 过：状态本身仍是一份完整的值，照常使用。
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        self.hub.session()
     }
 }
 
@@ -54,14 +97,16 @@ impl Handler for Services {
         match call.method.name {
             "session.status" => session::status(self, params),
             "session.start" => session::start(self, params).await,
-            "session.stop" => session::stop(self, params),
+            "session.stop" => session::stop(self, params).await,
             "profile.list" => profile::list(self, params).await,
             "profile.get" => profile::get(self, params).await,
             "profile.save" => profile::save(self, params).await,
             "profile.delete" => profile::delete(self, params).await,
             "node.import" => node::import(self, params).await,
             "node.list" => node::list(self, params).await,
-            "node.test" => node::test(self, params),
+            "node.test" => latency::test(self, params).await,
+            "process.list" => process::list(self, params, call.caller).await,
+            "diag.export" => diag::export(self, params, call.caller).await,
             other => {
                 tracing::debug!(
                     method = other,
@@ -74,6 +119,10 @@ impl Handler for Services {
                 ))
             }
         }
+    }
+
+    fn events(&self) -> Option<Subscription> {
+        Some(self.hub.subscribe())
     }
 }
 

@@ -37,6 +37,8 @@ const enUS: Messages = {
     session: {
       already_running: 'A session is already running',
       not_running: 'No session is running',
+      fail_closed_unsupported:
+        'The filters the "Block" failure policy needs could not be installed, so the session was not started to keep target processes from going direct; switch to "Allow" or check the logs and retry',
     },
     profile: {
       not_found: 'Profile not found',
@@ -128,6 +130,10 @@ const enUS: Messages = {
       confirmBody:
         'Every program on this computer will resolve names through ProcRoute, not only the target processes. The original DNS settings are restored when the session stops or the app exits.',
       confirm: 'Turn on',
+      remote: 'Remote DNS server (optional)',
+      remotePlaceholder: 'tls://dns.example or https://dns.example/dns-query',
+      remoteHint:
+        'Port 53 queries sent by the target processes are resolved by this server through the proxy, avoiding poisoned local answers; leave empty to keep them as they are',
     },
     udpLegend: 'UDP',
     udp: {
@@ -150,6 +156,7 @@ const enUS: Messages = {
       invalidTag: 'Lowercase letters, digits, - and _ only, up to 32 characters',
       duplicateTag: 'Duplicate group tag',
       noRules: 'Add at least one rule',
+      dnsServer: 'Use an address starting with udp://, tcp://, tls:// or https://',
     },
     issues: {
       schema_version: 'Unsupported profile version',
@@ -162,6 +169,7 @@ const enUS: Messages = {
       duplicate_tag: 'Duplicate group tag',
       no_matchers: 'Add at least one rule',
       invalid_rule: 'The rule cannot be parsed; check its syntax',
+      invalid_dns_server: 'The DNS server address is not valid',
     },
     add: {
       title: 'Add processes to group {{tag}}',
@@ -188,6 +196,8 @@ const enUS: Messages = {
     importLinks: 'Import share links',
     testAll: 'Test all',
     testing: 'Testing…',
+    testNeedsUrl: 'Set a latency test URL in Settings before testing.',
+    goToSettings: 'Open Settings',
     addSubscription: 'Add subscription',
     subscriptionsTitle: 'Subscriptions',
     noSubscriptions: 'No subscriptions yet',
@@ -230,6 +240,34 @@ const enUS: Messages = {
       result: '{{added}} added, {{skipped}} skipped',
       issue: 'Line {{line}}: {{reason}}',
       required: 'Paste at least one share link',
+      reasons: {
+        duplicate: 'Same as an existing node',
+        malformed: 'Cannot parse this link',
+        unsupported_protocol: 'Unsupported protocol',
+        invalid_port: 'Invalid port',
+        invalid_port_range: 'Invalid port range',
+        invalid_server: 'Invalid server address',
+        invalid_parameter: 'Invalid parameter',
+        unsupported_cipher: 'Unsupported cipher',
+        unsupported_plugin: 'Unsupported plugin',
+        vmess_legacy_alter_id: 'Legacy VMess (alterId above 0) is not supported',
+        unsupported_transport: 'Unsupported transport',
+        unsupported_security: 'Unsupported security layer',
+        unsupported_flow: 'Unsupported flow',
+        unsupported_encryption: 'Unsupported encryption setting',
+        unsupported_obfs: 'Unsupported obfuscation',
+        unsupported_cert_pin: 'Certificate pinning (pinSHA256) is not supported',
+        looks_like_subscription_url: 'This is a subscription URL; use "Add subscription"',
+        missing_credential: 'Missing password or UUID',
+        invalid_credential: 'Malformed credential',
+        invalid_uuid: 'Malformed UUID',
+        invalid_reality: 'REALITY settings are incomplete or malformed',
+        incomplete_auth: 'Username and password must be given together',
+        input_too_large: 'Input exceeds the 10 MB limit',
+        too_many_nodes: 'The 5000-node limit is reached; the rest were not imported',
+        clash_yaml_unsupported: 'Clash / mihomo YAML subscriptions are not supported yet',
+        empty_input: 'Nothing to import',
+      },
     },
     subscription: {
       title: 'Add subscription',
@@ -332,6 +370,33 @@ const enUS: Messages = {
     antiCheatHint:
       'Some anti-cheat software checks loaded drivers. If a game refuses to start, switch the profile to TUN mode, or stop the session and unload the driver.',
     themes: { system: 'System', light: 'Light', dark: 'Dark' },
+    autostart: 'Start at sign-in',
+    autostartHint: 'Starts in the tray after you sign in to Windows, without opening the window',
+    latencyTitle: 'Latency test',
+    latencyUrl: 'Test URL',
+    latencyUrlHint:
+      'ProcRoute has no built-in test URL. Enter an https URL (for example a page that returns 204); each node is timed fetching it. Leave empty to disable testing.',
+    latencyUrlInvalid: 'Enter a URL starting with https://, at most 2048 characters',
+    save: 'Save',
+    saved: 'Saved',
+    diagTitle: 'Diagnostics',
+    diagHint:
+      'Export the service log, profiles and environment into one file for troubleshooting or to attach to a bug report. Credentials, subscription URLs, node names and addresses, public IPs and user names are removed; please still look it over before sharing.',
+    diagExport: 'Export diagnostics',
+    diagExporting: 'Exporting…',
+    diagSaved: 'Saved to your Downloads folder:',
+    diagSaveFailed: 'The report was created but could not be saved to your Downloads folder',
+  },
+  tray: {
+    tooltipIdle: 'ProcRoute: no session',
+    tooltipRunning: 'ProcRoute: {{name}}',
+    tooltipOffline: 'ProcRoute: cannot reach the service',
+    show: 'Show window',
+    start: 'Start session ({{name}})',
+    startNoProfile: 'Start session',
+    stop: 'Stop session',
+    profiles: 'Switch profile',
+    quit: 'Quit ProcRoute',
   },
 }
 

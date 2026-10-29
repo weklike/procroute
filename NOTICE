@@ -14,7 +14,13 @@ sing-box 1.14.4（作为独立子进程随安装包分发，打包见 T-110）
   二进制：https://github.com/SagerNet/sing-box/releases/tag/v1.14.4
         只分发 sing-box.exe 与其 LICENSE；SHA256 见 third_party/sing-box/lock.json
 
-（WinDivert 在 T-071 锁定时补充）
+WinDivert 2.2.2（驱动 WinDivert64.sys 与 WinDivert.dll 随安装包分发，打包见 T-110）
+  许可证：LGPL-3.0-only 或 GPL-2.0-only 二选一，ProcRoute 按 LGPL-3.0 使用；
+    源码头的版权声明为 "(C) 2019, all rights reserved"，作者 basil00
+  源码：https://github.com/basil00/WinDivert/tree/v2.2.2
+        （修订 1789526ecfb9ff5397c94f9f54c1a3dc2fb60440）
+  二进制：https://github.com/basil00/WinDivert/releases/tag/v2.2.2
+        只分发 x64 的 WinDivert.dll、WinDivert64.sys 与 LICENSE；SHA256 见 third_party/windivert/lock.json
 
 随源码分发的第三方源代码
 --------------------------------------------------------

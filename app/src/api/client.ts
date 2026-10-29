@@ -4,8 +4,9 @@
 // 只有 features/<领域>/api.ts 与 hooks/ 可以导入本文件；组件禁止直接调用（C-CODE-09，lint 强制）。
 //
 // 开发构建里、且不在 Tauri 里运行时（`pnpm -C app dev` 用浏览器打开、或单元测试），改用 ./mock
-// 里的内存模拟服务，方便在开发机上做界面而不连真实服务。生产构建中 `import.meta.env.DEV` 为常量
-// false，模拟服务连同示例数据被整体剔除，不会随安装包分发（C-SEC-09）。
+// 里的内存模拟服务，方便在开发机上做界面而不连真实服务；`VITE_IPC_MOCK=1 pnpm -C app tauri dev`
+// 在桌面外壳里也用它（开发机上不运行服务，AGENTS 第 8 节第 5 条）。生产构建中 `import.meta.env.DEV`
+// 为常量 false，模拟服务连同示例数据被整体剔除，不会随安装包分发（C-SEC-09）。
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
@@ -35,12 +36,16 @@ export function tauriEventName(channel: IpcChannel): string {
 let mockService: Promise<MockService> | null = null
 
 function shouldUseMock(): boolean {
-  return import.meta.env.DEV && !isTauri()
+  return import.meta.env.DEV && (!isTauri() || import.meta.env.VITE_IPC_MOCK === '1')
 }
 
 /** 浏览器开发与测试用的模拟服务；首次使用时创建。 */
 function mock(): Promise<MockService> {
-  mockService ??= import('./mock/service').then((m) => m.createMockService())
+  // 动态 import 必须直接放在 `import.meta.env.DEV` 的分支里：生产构建中它是常量 false，打包器才能
+  // 把整个模拟服务（含示例数据）剔除。只在 shouldUseMock() 里判断不够，模块仍会被打进安装包。
+  mockService ??= import.meta.env.DEV
+    ? import('./mock/service').then((m) => m.createMockService())
+    : Promise.reject(new Error('the mock service only exists in development builds'))
   return mockService
 }
 

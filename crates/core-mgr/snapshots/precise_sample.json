@@ -1,0 +1,185 @@
+{
+  "dns": {
+    "final": "local",
+    "servers": [
+      {
+        "tag": "local",
+        "type": "local"
+      }
+    ]
+  },
+  "experimental": {
+    "clash_api": {
+      "access_control_allow_origin": [
+        "http://127.0.0.1"
+      ],
+      "external_controller": "127.0.0.1:59123",
+      "secret": "0123456789abcdefABCDEF0123456789"
+    }
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 59124,
+      "tag": "socks-in",
+      "type": "socks",
+      "users": [
+        {
+          "password": "SocksPassword0123456789abcdefXYZ",
+          "username": "game"
+        },
+        {
+          "password": "SocksPassword0123456789abcdefXYZ",
+          "username": "browser"
+        },
+        {
+          "password": "SocksPassword0123456789abcdefXYZ",
+          "username": "chat"
+        }
+      ]
+    }
+  ],
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "interval": "300s",
+      "outbounds": [
+        "vless-reality",
+        "hy2"
+      ],
+      "tag": "hk-auto",
+      "type": "urltest",
+      "url": "https://probe.example.net/generate_204"
+    },
+    {
+      "default": "trojan",
+      "outbounds": [
+        "trojan",
+        "anytls"
+      ],
+      "tag": "manual",
+      "type": "selector"
+    },
+    {
+      "flow": "xtls-rprx-vision",
+      "server": "vl.example.com",
+      "server_port": 443,
+      "tag": "vless-reality",
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+          "short_id": "0123456789abcdef"
+        },
+        "server_name": "www.example.org",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      },
+      "type": "vless",
+      "uuid": "bf000d23-0752-40b4-affe-68f7707a9661"
+    },
+    {
+      "obfs": {
+        "password": "obfs-password",
+        "type": "salamander"
+      },
+      "password": "hy2-password",
+      "server": "hy.example.com",
+      "server_port": 443,
+      "server_ports": [
+        "20000:30000"
+      ],
+      "tag": "hy2",
+      "tls": {
+        "enabled": true,
+        "server_name": "hy.example.com"
+      },
+      "type": "hysteria2"
+    },
+    {
+      "password": "trojan-password",
+      "server": "tj.example.com",
+      "server_port": 443,
+      "tag": "trojan",
+      "tls": {
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "enabled": true,
+        "insecure": true,
+        "server_name": "tj.example.com"
+      },
+      "type": "trojan"
+    },
+    {
+      "password": "anytls-password",
+      "server": "at.example.com",
+      "server_port": 443,
+      "tag": "anytls",
+      "tls": {
+        "enabled": true,
+        "server_name": "at.example.com"
+      },
+      "type": "anytls"
+    },
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "8JCsPssfgS8tiRwiMlhARg==",
+      "server": "2001:db8::1",
+      "server_port": 8388,
+      "tag": "ss2022",
+      "type": "shadowsocks"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local",
+    "final": "direct",
+    "rules": [
+      {
+        "action": "sniff",
+        "inbound": [
+          "socks-in"
+        ]
+      },
+      {
+        "action": "route",
+        "auth_user": [
+          "game"
+        ],
+        "outbound": "hk-auto"
+      },
+      {
+        "action": "route",
+        "auth_user": [
+          "browser"
+        ],
+        "outbound": "manual"
+      },
+      {
+        "action": "route",
+        "auth_user": [
+          "chat"
+        ],
+        "outbound": "ss2022"
+      },
+      {
+        "action": "reject",
+        "inbound": [
+          "socks-in"
+        ]
+      }
+    ]
+  }
+}

@@ -173,8 +173,8 @@ export function createMockService(): MockService {
       const protocol = SCHEMES[scheme]
       if (!protocol) {
         result.skipped += 1
-        // 原因里不回显链接内容（C-SEC-04）
-        result.issues.push({ line: i + 1, reason: 'unsupported or malformed link' })
+        // 与服务一样只给原因代码，不回显链接内容（C-SEC-04）
+        result.issues.push({ line: i + 1, reason: scheme ? 'unsupported_protocol' : 'malformed' })
         return
       }
       const fragment = line.includes('#') ? line.slice(line.lastIndexOf('#') + 1) : ''
@@ -273,16 +273,27 @@ export function createMockService(): MockService {
       return { added: 0, skipped: 0, issues: [] }
     },
     'node.list': () => ({ nodes, outbounds, subscriptions }),
-    'node.test': ({ ids }) => ({
-      results: (ids.length > 0 ? ids : nodes.map((n) => n.id)).map((id, i) => {
-        const timedOut = i % 5 === 2
-        return {
-          id,
-          latency_ms: timedOut ? null : 30 + ((i * 47) % 260),
-          timed_out: timedOut,
-        }
-      }),
-    }),
+    'node.test': ({ ids, url }) => {
+      // 与服务一致：测速地址由用户填写，一次最多 64 个节点
+      if (!url || !/^https:\/\/\S+$/.test(url)) {
+        fail('ipc.invalid_params', 'set a latency test URL first')
+      }
+      const targets = ids.length > 0 ? [...new Set(ids)] : nodes.map((n) => n.id)
+      if (targets.some((id) => !nodes.some((n) => n.id === id))) {
+        fail('node.not_found', 'node not found')
+      }
+      if (targets.length > 64) fail('ipc.invalid_params', 'at most 64 nodes per call')
+      return {
+        results: targets.map((id, i) => {
+          const timedOut = i % 5 === 2
+          return {
+            id,
+            latency_ms: timedOut ? null : 30 + ((i * 47) % 260),
+            timed_out: timedOut,
+          }
+        }),
+      }
+    },
     'process.list': () => ({ processes: PROCESSES }),
     'conn.subscribe': () => ({}),
     'log.subscribe': () => ({}),
@@ -291,6 +302,24 @@ export function createMockService(): MockService {
       if (session.state !== 'stopped') fail('driver.busy', 'session is running')
       return { state: 'inactive', version: '2.2.2' }
     },
+    // 只为类型完整：界面经外壳的 `diag_export` 导出，浏览器里不显示导出入口
+    'diag.export': () => ({
+      generated_at_ms: Date.now(),
+      environment: {
+        service_version: '0.1.0-mock',
+        protocol_version: 1,
+        os_build: null,
+        os_display_version: null,
+        memory_integrity: null,
+        kernel_version: null,
+        kernel_binary: 'unknown',
+      },
+      session,
+      profiles,
+      nodes: null,
+      log: { available: false, truncated: false, lines: [] },
+      problems: [],
+    }),
   }
 
   return {

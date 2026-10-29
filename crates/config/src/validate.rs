@@ -11,6 +11,8 @@ use procroute_proto::profile::{MatchRule, PROFILE_SCHEMA_VERSION, Profile};
 use procroute_rules::matcher::{Matcher, RuleError};
 use thiserror::Error;
 
+use crate::dns::{DnsServerError, parse_remote};
+
 pub const MAX_ID_LEN: usize = 64;
 pub const MAX_NAME_LEN: usize = 64;
 pub const MAX_TAG_LEN: usize = 32;
@@ -46,6 +48,8 @@ pub enum IssueKind {
     DuplicateTag(String),
     #[error("进程组至少需要一条匹配规则")]
     NoMatchers,
+    #[error("DNS 服务器地址无效：{0}")]
+    DnsServer(DnsServerError),
     #[error(transparent)]
     Rule(#[from] RuleError),
 }
@@ -63,6 +67,7 @@ impl IssueKind {
             IssueKind::ControlChar => FieldIssueCode::ControlChar,
             IssueKind::DuplicateTag(_) => FieldIssueCode::DuplicateTag,
             IssueKind::NoMatchers => FieldIssueCode::NoMatchers,
+            IssueKind::DnsServer(_) => FieldIssueCode::InvalidDnsServer,
             IssueKind::Rule(_) => FieldIssueCode::InvalidRule,
         }
     }
@@ -140,6 +145,11 @@ pub fn validate(p: &Profile) -> Result<(), Vec<ValidationIssue>> {
         check_rules(&g.matchers, &format!("{base}.match"), &mut push);
     }
     check_rules(&p.exclude, "exclude", &mut push);
+    if let Some(server) = &p.dns.remote_server
+        && let Err(e) = parse_remote(server)
+    {
+        push("dns.remote_server".into(), IssueKind::DnsServer(e));
+    }
 
     if issues.is_empty() {
         Ok(())
@@ -291,6 +301,19 @@ mod tests {
         p.groups.push(p.groups[0].clone());
         let issues = validate(&p).unwrap_err();
         assert_eq!(issues[0].kind, IssueKind::DuplicateTag("game".into()));
+    }
+
+    #[test]
+    fn remote_dns_servers_are_checked() {
+        let mut p = valid();
+        p.dns.remote_server = Some("tls://198.51.100.53:853".into());
+        assert_eq!(validate(&p), Ok(()));
+        p.dns.remote_server = Some("quic://dns.example".into());
+        let issues = validate(&p).unwrap_err();
+        assert_eq!(issues[0].path, "dns.remote_server");
+        assert_eq!(issues[0].kind.code(), FieldIssueCode::InvalidDnsServer);
+        p.dns.remote_server = Some(String::new());
+        assert_eq!(paths(&p), vec!["dns.remote_server"]);
     }
 
     #[test]

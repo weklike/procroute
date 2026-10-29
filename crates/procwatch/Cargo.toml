@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "procroute-procwatch"
+description = "进程追踪：ETW 事件 + Toolhelp 快照，维护以「PID + 创建时间」为键的进程树与目标集合"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# 编译需要管理员终端的测试（tests/watcher_admin.rs）：只开私有 ETW 会话、不改网络与系统设置。
+admin-tests = []
+
+[dependencies]
+procroute-rules = { path = "../rules" }
+
+[target.'cfg(windows)'.dependencies]
+procroute-platform-win = { path = "../platform-win" }
+tracing = "0.1.44"
+
+[dev-dependencies]
+procroute-proto = { path = "../proto" }
+
+[lints]
+workspace = true

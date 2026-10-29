@@ -17,8 +17,21 @@ use crate::validate::{ValidationIssue, validate};
 /// 一步迁移：把版本 n 的 JSON 改写为版本 n+1。
 type Step = fn(Value) -> Result<Value, String>;
 
-/// `STEPS[i]` 把 v(i+1) 升到 v(i+2)。当前只有 v1，没有迁移步骤。
-const STEPS: &[Step] = &[];
+/// `STEPS[i]` 把 v(i+1) 升到 v(i+2)。
+const STEPS: &[Step] = &[v1_to_v2];
+
+/// v2 新增 `dns.remote_server`：旧方案没有远程 DNS 服务器。
+fn v1_to_v2(mut value: Value) -> Result<Value, String> {
+    let obj = value.as_object_mut().ok_or("顶层必须是对象")?;
+    match obj.get_mut("dns") {
+        None => {}
+        Some(Value::Object(dns)) => {
+            dns.entry("remote_server").or_insert(Value::Null);
+        }
+        Some(_) => return Err("dns 必须是对象".into()),
+    }
+    Ok(value)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigError {
@@ -130,6 +143,35 @@ mod tests {
         assert_eq!(p.groups[0].tag, "game");
         assert!(!p.groups[1].include_children);
         assert_eq!(p.exclude[0].value, "updater.exe");
+    }
+
+    #[test]
+    fn v1_profiles_gain_an_empty_remote_dns_server() {
+        let text = fs::read_to_string(fixtures_dir().join("v1.json")).unwrap();
+        let v1: Value = serde_json::from_str(&text).unwrap();
+        let v2 = migrate_value(v1).unwrap();
+        assert_eq!(v2["schema_version"], 2);
+        assert_eq!(v2["dns"]["remote_server"], Value::Null);
+        assert_eq!(v2["dns"]["strategy"], "sniff", "existing fields are kept");
+        let p = load_profile(&text).unwrap();
+        assert_eq!(p.dns.remote_server, None);
+        // dns 缺失时用默认值；dns 不是对象时报错而不是丢弃
+        let bare = migrate_value(serde_json::json!({ "schema_version": 1, "id": "a" })).unwrap();
+        assert!(bare.get("dns").is_none());
+        assert!(matches!(
+            migrate_value(serde_json::json!({ "schema_version": 1, "dns": 5 })),
+            Err(ConfigError::Step { to: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn v2_fixture_keeps_its_remote_dns_server() {
+        let text = fs::read_to_string(fixtures_dir().join("v2.json")).unwrap();
+        let p = load_profile(&text).unwrap();
+        assert_eq!(
+            p.dns.remote_server.as_deref(),
+            Some("tls://198.51.100.53:853")
+        );
     }
 
     #[test]

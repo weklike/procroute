@@ -35,6 +35,8 @@ const zhCN = {
     session: {
       already_running: '会话已在运行',
       not_running: '会话没有在运行',
+      fail_closed_unsupported:
+        '无法安装「阻断」策略需要的过滤规则，为避免目标进程直连，会话没有启动；可以改为「放行」或查看日志后重试',
     },
     profile: {
       not_found: '方案不存在',
@@ -114,6 +116,9 @@ const zhCN = {
       confirmBody:
         '开启后，本机所有程序的 DNS 查询都会经过 ProcRoute，不只是目标进程。停止会话或退出程序时会自动恢复原来的 DNS 设置。',
       confirm: '确认开启',
+      remote: '远程 DNS 服务器（可选）',
+      remotePlaceholder: 'tls://dns.example 或 https://dns.example/dns-query',
+      remoteHint: '目标进程直发的 53 端口查询经代理交给它解析，绕开本地被污染的结果；留空则不接管',
     },
     udpLegend: 'UDP',
     udp: {
@@ -136,6 +141,7 @@ const zhCN = {
       invalidTag: '只能包含小写字母、数字、- 和 _，最多 32 个字符',
       duplicateTag: '组标签重复',
       noRules: '至少需要一条规则',
+      dnsServer: '请填写 udp://、tcp://、tls:// 或 https:// 开头的地址',
     },
     issues: {
       schema_version: '方案版本不受支持',
@@ -148,6 +154,7 @@ const zhCN = {
       duplicate_tag: '组标签重复',
       no_matchers: '至少需要一条规则',
       invalid_rule: '规则无法解析，请检查语法',
+      invalid_dns_server: 'DNS 服务器地址格式不正确',
     },
     add: {
       title: '添加进程到 {{tag}} 组',
@@ -173,6 +180,8 @@ const zhCN = {
     importLinks: '导入分享链接',
     testAll: '全部测速',
     testing: '测速中…',
+    testNeedsUrl: '测速前先在设置中填写测速地址。',
+    goToSettings: '前往设置',
     addSubscription: '添加订阅',
     subscriptionsTitle: '订阅',
     noSubscriptions: '还没有订阅',
@@ -215,6 +224,34 @@ const zhCN = {
       result: '新增 {{added}} 个，跳过 {{skipped}} 个',
       issue: '第 {{line}} 行：{{reason}}',
       required: '请粘贴至少一条分享链接',
+      reasons: {
+        duplicate: '与已有节点重复',
+        malformed: '无法解析的链接',
+        unsupported_protocol: '不支持的协议',
+        invalid_port: '端口无效',
+        invalid_port_range: '端口范围无效',
+        invalid_server: '服务器地址无效',
+        invalid_parameter: '参数无效',
+        unsupported_cipher: '不支持的加密方式',
+        unsupported_plugin: '不支持的插件',
+        vmess_legacy_alter_id: '不支持旧版 VMess（alterId 大于 0）',
+        unsupported_transport: '不支持的传输方式',
+        unsupported_security: '不支持的安全层',
+        unsupported_flow: '不支持的流控',
+        unsupported_encryption: '不支持的加密设置',
+        unsupported_obfs: '不支持的混淆方式',
+        unsupported_cert_pin: '不支持证书固定（pinSHA256）',
+        looks_like_subscription_url: '这是订阅地址，请用「添加订阅」',
+        missing_credential: '缺少密码或 UUID',
+        invalid_credential: '凭据格式不正确',
+        invalid_uuid: 'UUID 格式不正确',
+        invalid_reality: 'REALITY 参数不完整或格式不正确',
+        incomplete_auth: '用户名与密码需要同时提供',
+        input_too_large: '内容超过 10 MB 上限',
+        too_many_nodes: '节点总数已达 5000 个上限，其余未导入',
+        clash_yaml_unsupported: '暂不支持 Clash / mihomo 的 YAML 订阅',
+        empty_input: '没有找到任何内容',
+      },
     },
     subscription: {
       title: '添加订阅',
@@ -306,6 +343,33 @@ const zhCN = {
     antiCheatHint:
       '部分游戏的反作弊会检查已加载的驱动。如果游戏无法启动，可以在方案里改用 TUN 分流模式，或停止会话后卸载驱动。',
     themes: { system: '跟随系统', light: '浅色', dark: '深色' },
+    autostart: '开机自启',
+    autostartHint: '登录 Windows 后在托盘中启动，不弹出主窗口',
+    latencyTitle: '节点测速',
+    latencyUrl: '测速地址',
+    latencyUrlHint:
+      'ProcRoute 不内置测速地址。填写一个 https 地址（例如返回 204 的页面），测速时经每个节点访问它并计时；留空则无法测速。',
+    latencyUrlInvalid: '请填写以 https:// 开头的地址，不超过 2048 个字符',
+    save: '保存',
+    saved: '已保存',
+    diagTitle: '诊断包',
+    diagHint:
+      '把服务日志、方案与运行环境导出成一个文件，便于排查问题或附在问题报告里。导出时会去掉凭据、订阅地址、节点名称与地址、公网 IP 和用户名；分享前仍请自己看一遍。',
+    diagExport: '导出诊断包',
+    diagExporting: '正在导出…',
+    diagSaved: '已保存到「下载」文件夹：',
+    diagSaveFailed: '诊断包已生成，但无法保存到「下载」文件夹',
+  },
+  tray: {
+    tooltipIdle: 'ProcRoute：未启动会话',
+    tooltipRunning: 'ProcRoute：{{name}}',
+    tooltipOffline: 'ProcRoute：无法连接到服务',
+    show: '显示主窗口',
+    start: '启动会话（{{name}}）',
+    startNoProfile: '启动会话',
+    stop: '停止会话',
+    profiles: '切换方案',
+    quit: '退出 ProcRoute',
   },
 }
 

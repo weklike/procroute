@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! 组件测试用的假 SOCKS5 服务器与回显目标（AGENTS 第 6 节）。
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,11 +52,16 @@ pub async fn spawn_udp_echo(tag: &'static [u8]) -> (SocketAddr, Arc<AtomicUsize>
 #[derive(Default)]
 struct Log {
     usernames: Vec<String>,
+    /// CONNECT 请求里的目标（IP 或域名）。
+    connect_requests: Vec<TargetAddr>,
+    /// 实际连接的地址（域名按测试给的表解析）。
     connect_targets: Vec<SocketAddr>,
     associates: usize,
+    /// 域名 → 地址，代替真实的 DNS。
+    domains: HashMap<String, SocketAddr>,
 }
 
-/// 假 SOCKS5 服务器：只接受用户名/密码认证（密码为 [`PASSWORD`]），支持 CONNECT 与
+/// 假 SOCKS5 服务器：只接受用户名/密码认证（密码为 [`PASSWORD`]），支持 CONNECT（IPv4 或域名）与
 /// UDP ASSOCIATE，并把真实请求转发到本机的回显目标。
 pub struct FakeSocks {
     pub addr: SocketAddr,
@@ -64,9 +70,17 @@ pub struct FakeSocks {
 
 impl FakeSocks {
     pub async fn spawn() -> Self {
+        Self::spawn_resolving(HashMap::new()).await
+    }
+
+    /// CONNECT 到域名时按 `domains` 解析；表里没有的域名回「主机不可达」。
+    pub async fn spawn_resolving(domains: HashMap<String, SocketAddr>) -> Self {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        let log = Arc::new(Mutex::new(Log::default()));
+        let log = Arc::new(Mutex::new(Log {
+            domains,
+            ..Log::default()
+        }));
         let shared = Arc::clone(&log);
         tokio::spawn(async move {
             while let Ok((s, _)) = l.accept().await {
@@ -82,6 +96,10 @@ impl FakeSocks {
 
     pub fn connect_targets(&self) -> Vec<SocketAddr> {
         self.log.lock().unwrap().connect_targets.clone()
+    }
+
+    pub fn connect_requests(&self) -> Vec<TargetAddr> {
+        self.log.lock().unwrap().connect_requests.clone()
     }
 
     pub fn associates(&self) -> usize {
@@ -120,13 +138,34 @@ async fn serve(mut s: TcpStream, log: Arc<Mutex<Log>>) {
 
     let mut head = [0u8; 4];
     s.read_exact(&mut head).await.unwrap();
-    assert_eq!(head[3], 1, "fake server only handles IPv4 requests");
-    let mut ip = [0u8; 4];
-    s.read_exact(&mut ip).await.unwrap();
-    let port = s.read_u16().await.unwrap();
-    let target = SocketAddr::from((ip, port));
+    let request = match head[3] {
+        1 => {
+            let mut ip = [0u8; 4];
+            s.read_exact(&mut ip).await.unwrap();
+            TargetAddr::Ip(SocketAddr::from((ip, s.read_u16().await.unwrap())))
+        }
+        3 => {
+            let len = s.read_u8().await.unwrap();
+            let mut name = vec![0u8; usize::from(len)];
+            s.read_exact(&mut name).await.unwrap();
+            TargetAddr::Domain(
+                String::from_utf8(name).unwrap(),
+                s.read_u16().await.unwrap(),
+            )
+        }
+        other => panic!("fake server does not handle address type {other}"),
+    };
+    let resolved = match &request {
+        TargetAddr::Ip(a) => Some(*a),
+        TargetAddr::Domain(name, _) => log.lock().unwrap().domains.get(name).copied(),
+    };
     match head[1] {
         1 => {
+            log.lock().unwrap().connect_requests.push(request);
+            let Some(target) = resolved else {
+                let _ = s.write_all(&[5, 4, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+                return;
+            };
             log.lock().unwrap().connect_targets.push(target);
             let Ok(mut up) = TcpStream::connect(target).await else {
                 let _ = s.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await;

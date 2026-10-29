@@ -33,21 +33,21 @@ crates/
   proto/         IPC 方法与消息类型（唯一事实来源），导出 TS 定义     [跨平台]
   config/        Profile / 规则模型、校验、schema 迁移                 [跨平台]
   rules/         进程匹配引擎，纯函数，无 IO                           [跨平台]
-  procwatch/     进程追踪：ETW 事件 + Toolhelp 快照，维护进程树          [Windows]
+  procwatch/     进程追踪：ETW 事件 + Toolhelp 快照，维护进程树          [Windows；进程树 tree 跨平台]
   intercept/     Interceptor trait 与后端：divert/、tun/（预留 ndis/）  [Windows；trait、判定逻辑与 mock 跨平台]
   relay/         NAT 表、本地 TCP/UDP 中继、SOCKS5 客户端               [跨平台]
   core-mgr/      节点模型与分享链接解析、sing-box 配置生成、子进程守护、控制 API 客户端  [Windows；守护以外跨平台]
   platform-win/  Windows API 封装：路径规范化、DPAPI、ACL、服务控制      [Windows；Secret<T> 跨平台]
   svc/           二进制：Windows 服务入口，唯一的组装点                 [Windows]
 app/
-  src-tauri/     Rust：IPC 客户端、托盘、自动更新（只依赖 proto）
+  src-tauri/     Rust（包名 procroute-ui）：控制管道客户端 ipc.rs、窗口 / 托盘 / 开机自启 shell.rs、诊断包存盘 diag.rs（只依赖 proto）
   src/           React 19 + TypeScript
     routes/        页面与路由定义（TanStack Router）
-    features/      按领域划分：session/ profile/ node/ conn/ log/，各自含 api.ts（Query hooks）与组件
+    features/      按领域划分：session/ profile/ node/ conn/ log/ shell/ settings/，各自含 api.ts（Query hooks）与组件
     components/    通用组件；components/ui/ 为 shadcn/ui 组件源码
     hooks/         通用 hooks，含 useIpcSubscription
     stores/        Zustand store（只放纯前端状态）
-    api/           generated.ts 由 gen-types 生成（禁止手改）；client.ts 为手写 IPC 薄封装
+    api/           generated.ts 由 gen-types 生成（禁止手改）；client.ts 为手写 IPC 薄封装；shell.ts 为外壳命令（托盘、自启、连接状态、诊断包导出）薄封装
     i18n/          zh-CN / en-US 文案资源
 third_party/
   windivert/     锁定版本的 dll/sys + SHA256 + LICENSE（只读）
@@ -79,13 +79,16 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | --- | --- |
 | 格式化 | `cargo fmt --all` ；`pnpm -C app format` |
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` ；`pnpm -C app lint` ；`pnpm -C app typecheck` |
-| 跨平台单测（任意 OS） | `cargo nextest run -p procroute-proto -p procroute-config -p procroute-rules -p procroute-intercept -p procroute-relay -p procroute-platform-win -p procroute-core-mgr`（core-mgr 的 `sing-box check` 回归只在 Windows 上编译） |
+| 跨平台单测（任意 OS） | `cargo nextest run -p procroute-proto -p procroute-config -p procroute-rules -p procroute-intercept -p procroute-relay -p procroute-platform-win -p procroute-core-mgr -p procroute-procwatch`（core-mgr 的 `sing-box check` 回归只在 Windows 上编译） |
 | 行覆盖率（C-TEST-01） | `cargo llvm-cov nextest -p <crate> --fail-under-lines 80`（`rules`、`config`、`relay` 在 CI 中强制） |
 | 全量单测（Windows） | `cargo nextest run --workspace` |
 | 前端单测 | `pnpm -C app test` |
 | 生成 IPC 的 TS 类型 | `cargo xtask gen-types` |
-| 拉取并校验第三方二进制 | `cargo xtask fetch-deps`（Windows；按 `third_party/*/lock.json` 校验 SHA256，输出到 `third_party/sing-box/bin/`） |
-| 本地开发运行 | 开发机：`pnpm -C app dev`（模拟 IPC，不连真实服务）；完整联调：在测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
+| 拉取并校验第三方二进制 | `cargo xtask fetch-deps`（Windows；按 `third_party/*/lock.json` 校验 SHA256，输出到各自的 `third_party/<组件>/bin/`：sing-box、WinDivert） |
+| 需要管理员的测试（ETW） | 管理员终端：`cargo nextest run -p procroute-platform-win -p procroute-procwatch --features admin-tests`（只开私有 ETW 进程事件会话，不加载驱动、不改网络与系统设置；开发机或虚拟机均可） |
+| 驱动相关测试（只在虚拟机） | 管理员终端：`cargo nextest run -p procroute-intercept --features vm-tests`（会安装并加载 WinDivert 驱动，禁止在开发机上运行，C-TEST-04） |
+| 本地开发运行 | 开发机：`pnpm -C app dev`（浏览器里打开，模拟 IPC，不连真实服务）；桌面外壳：PowerShell 里 `$env:VITE_IPC_MOCK='1'; pnpm -C app tauri dev`（同样用模拟 IPC）；完整联调：在测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
+| 构建桌面客户端 | `pnpm -C app tauri build --debug --no-bundle`（先跑前端生产构建，再编译 `procroute-ui.exe`；不出安装包） |
 | 打包安装包 | `cargo xtask bundle` |
 | 端到端测试 | `cargo xtask e2e --vm <name>`（只在 Hyper-V 虚拟机中运行） |
 | 依赖与许可审计 | `cargo deny check` ；`pnpm -C app audit` |
@@ -218,5 +221,6 @@ pnpm -C app lint && pnpm -C app typecheck && pnpm -C app test
 - **自身回环**：sing-box、服务、UI 自身的流量以及去往代理服务器 IP 的流量必须排除，否则会形成环路。
 - **驱动文件**：驱动加载期间禁止删除或替换 `.sys`，否则可能导致反作弊拒绝启动游戏。
 - **sing-box 配置版本**：其配置字段随版本频繁弃用，生成器必须以锁定版本为准，不要照搬网上的旧配置。
+- **sing-box 测速地址**：控制 API 的 `/proxies/{tag}/delay` 会把 `http://` 开头的 `url` 换成内置的默认地址（访问外网，违反 C-SEC-09），只能传 `https://`；测试里要验证内核连到的是给定地址，而不是只看有没有返回延迟。
 - **React 严格模式下 effect 执行两次**：开发环境中 effect 会挂载、卸载、再挂载。订阅类 effect 必须在清理函数里取消订阅，否则会向服务重复订阅事件流。
 - **高频事件直接 setState**：连接和日志事件每秒可能上千条，逐条 `setState` 会卡死界面，必须经环形缓冲批量刷新。

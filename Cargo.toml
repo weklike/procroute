@@ -2,10 +2,12 @@
 [workspace]
 resolver = "3"
 members = [
+    "app/src-tauri",
     "crates/config",
     "crates/core-mgr",
     "crates/intercept",
     "crates/platform-win",
+    "crates/procwatch",
     "crates/proto",
     "crates/relay",
     "crates/rules",

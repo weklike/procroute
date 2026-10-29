@@ -28,6 +28,10 @@ pub enum ErrorCode {
     SessionAlreadyRunning,
     #[serde(rename = "session.not_running")]
     SessionNotRunning,
+    /// 无法保证 `fail_policy = block`，因此没有启动会话：例如 TUN 模式需要的阻断过滤器装不上（C-NET-03）。
+    /// 用户可以改用 `allow`，或排查后重试。
+    #[serde(rename = "session.fail_closed_unsupported")]
+    SessionFailClosedUnsupported,
     #[serde(rename = "profile.not_found")]
     ProfileNotFound,
     #[serde(rename = "profile.invalid_schema")]
@@ -61,6 +65,7 @@ impl ErrorCode {
         ErrorCode::IpcInvalidParams,
         ErrorCode::SessionAlreadyRunning,
         ErrorCode::SessionNotRunning,
+        ErrorCode::SessionFailClosedUnsupported,
         ErrorCode::ProfileNotFound,
         ErrorCode::ProfileInvalidSchema,
         ErrorCode::ProfileInUse,
@@ -84,6 +89,7 @@ impl ErrorCode {
             ErrorCode::IpcInvalidParams => "ipc.invalid_params",
             ErrorCode::SessionAlreadyRunning => "session.already_running",
             ErrorCode::SessionNotRunning => "session.not_running",
+            ErrorCode::SessionFailClosedUnsupported => "session.fail_closed_unsupported",
             ErrorCode::ProfileNotFound => "profile.not_found",
             ErrorCode::ProfileInvalidSchema => "profile.invalid_schema",
             ErrorCode::ProfileInUse => "profile.in_use",
@@ -130,6 +136,8 @@ pub enum FieldIssueCode {
     NoMatchers,
     /// 匹配规则无法编译（正则、通配符语法错误等）。
     InvalidRule,
+    /// DNS 服务器地址格式不正确（`dns.remote_server`）。
+    InvalidDnsServer,
 }
 
 /// 某个字段上的一个问题。

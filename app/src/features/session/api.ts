@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 会话与驱动的 Query / Mutation hook。服务端状态只放在 Query 缓存里（C-CODE-09）。
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  useIsMutating,
+  useMutation,
+  useMutationState,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { useEffect } from 'react'
 
 import { call, subscribe } from '@/api/client'
@@ -9,6 +15,8 @@ import type { DriverStatus, SessionStatus } from '@/api/generated'
 export const sessionKeys = {
   status: ['session', 'status'] as const,
   driver: ['driver', 'status'] as const,
+  /** 启动与停止会话共用的 mutation 前缀：会话条与托盘菜单触发的操作统一显示进度与错误。 */
+  mutation: ['session'] as const,
 }
 
 /**
@@ -42,9 +50,15 @@ export function useSessionStatus() {
   return useQuery({ queryKey: sessionKeys.status, queryFn: () => call('session.status', {}) })
 }
 
-function useSessionMutation<P>(fn: (p: P) => Promise<SessionStatus>) {
+/** 只读会话状态缓存，不另建事件订阅（订阅由 useSessionStatus 负责，会话条始终挂载）。 */
+export function useSessionStatusQuery() {
+  return useQuery({ queryKey: sessionKeys.status, queryFn: () => call('session.status', {}) })
+}
+
+function useSessionMutation<P>(action: 'start' | 'stop', fn: (p: P) => Promise<SessionStatus>) {
   const qc = useQueryClient()
   return useMutation({
+    mutationKey: [...sessionKeys.mutation, action],
     mutationFn: fn,
     onSuccess: (s) => {
       qc.setQueryData(sessionKeys.status, s)
@@ -55,11 +69,30 @@ function useSessionMutation<P>(fn: (p: P) => Promise<SessionStatus>) {
 }
 
 export function useStartSession() {
-  return useSessionMutation((profileId: string) => call('session.start', { profile_id: profileId }))
+  return useSessionMutation('start', (profileId: string) =>
+    call('session.start', { profile_id: profileId }),
+  )
 }
 
 export function useStopSession() {
-  return useSessionMutation(() => call('session.stop', {}))
+  return useSessionMutation('stop', () => call('session.stop', {}))
+}
+
+/**
+ * 会话启停是否正在进行，以及最近一次启停的失败（成功后清除）。
+ * 会话条的按钮与托盘菜单各自持有 mutation，这里按共同的 key 汇总。
+ */
+export function useSessionActivity(): { busy: boolean; error: unknown } {
+  const busy = useIsMutating({ mutationKey: sessionKeys.mutation }) > 0
+  const states = useMutationState({
+    filters: { mutationKey: sessionKeys.mutation },
+    select: (m) => ({ status: m.state.status, error: m.state.error, at: m.state.submittedAt }),
+  })
+  const last = states.reduce<(typeof states)[number] | undefined>(
+    (latest, s) => (latest === undefined || s.at >= latest.at ? s : latest),
+    undefined,
+  )
+  return { busy, error: last?.status === 'error' ? last.error : null }
 }
 
 export function useDriverStatus() {

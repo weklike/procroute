@@ -43,9 +43,10 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-055、T-057、T-058（部分，见下）、T-060 ~ T-062 | T-056（需要 Windows）；订阅拉取待定依赖（见下） |
-| M2 | T-070、T-073、T-074 | T-071（需要 Windows） |
-| M3 | T-090、T-096、T-097 | T-091（需要 Windows）；T-092、T-095 依赖 T-055 |
+| M1 | T-050 ~ T-058、T-060 ~ T-062 | 在虚拟机里验证 TUN + `block` 的 WFP 阻断（`procroute-platform-win --features vm-tests`） |
+| M2 | T-070、T-071（FFI 与版本锁；驱动相关测试待虚拟机验证）、T-073、T-074、T-079 | 在虚拟机里跑 `--features vm-tests`，通过后做 T-072 / T-075（改道到回环中继的方式需在虚拟机里试） |
+| M3 | T-090、T-092（中继嗅探 + 远程 DNS，见下）、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-095 的接线随 T-078 |
+| M4 | T-112、T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
 
 偏离原计划的地方：
 
@@ -67,23 +68,77 @@
   `authenticode`、`service` 模块；客户端校验单独放 `crates/svc/src/client_auth.rs`。管道上一行一条 JSON-RPC 消息
   （`\n` 或 `\r\n` 结尾，不含行尾不超过 1 MiB）。签名校验关闭吊销检查、只用本地缓存（C-SEC-08）。
   开发构建可开 `insecure-skip-client-auth` 特性跳过客户端校验，release 构建开启会编译失败（C-SEC-02）。
-- T-058 只完成了一部分：`profile.*`、`session.status`/`session.stop`、`node.import`（分享链接）/ `node.list`、
-  配置目录 ACL（`platform-win::dir_acl`，C-SEC-05）、服务模式日志 `logs\svc.log`。`session.start` 返回
-  `kernel.unavailable`（等 T-056 守护进程）；`node.test` 返回 `kernel.unavailable`；订阅导入返回 `node.import_failed`；
-  其他未接入的方法返回 `internal.error`，不假装成功。日志暂无轮转。
+- T-058：`profile.*`、`session.*`、`node.import`（分享链接）/ `node.list`、`process.list`、配置目录 ACL
+  （`platform-win::dir_acl`，C-SEC-05）、服务模式日志 `logs\svc.log`。`process.list` 只列与调用者同一 Windows
+  会话的进程（服务能看到所有用户的进程），并标出命中运行中会话方案的进程组。`node.test` 见下面的测速一条；
+  未接入的方法（`driver.*`）返回 `internal.error`，不假装成功。日志暂无轮转。
+  - `session.start` 目前只能启动 TUN 模式且 `fail_policy = allow`：精确进程模式返回 `driver.not_loaded`（等 T-071 起的
+    拦截后端）；TUN + `block` 返回新增的 `session.fail_closed_unsupported`（见下面 T-055 的 C-NET-03 一条）。
+    内核状态（重启中、恢复、超出重启上限）实时写回会话：`block` 进入 `blocked`，`allow` 结束会话、内核显示失败。
+    内核的启动经 `svc::kernel::KernelLauncher`，测试用假实现；开发机上不真正建 TUN（C-TEST-04）。
+  - TUN 模式的连接面板：会话运行期间每秒读一次内核控制 API 的连接列表（`core-mgr::clash_api`，手写 HTTP/1.0，
+    不引入 HTTP 库），差异转成 `conn.subscribe` 事件（`svc::conn_watch`）。只推被改道的连接，内核路由为 `direct`
+    的不推也不保留（C-NET-02）；进程组按规则引擎对进程路径重新判定；TUN 模式拿不到 PID，事件里为 0。
+  - 管道上的推送：握手后每次会话状态变化都推 `session.status`；`conn.subscribe` / `log.subscribe` 由管道服务端
+    处理（不进 `Handler`），订阅持续到连接断开，`log.subscribe` 按 `min_level` 过滤。服务日志经 `svc::log_stream`
+    转成日志事件；sing-box 自己的输出直接丢弃（它的日志带网关、目标地址）。连接事件的来源随 M2 接入。
+  - 服务在配置目录加固之后移除令牌特权，只保留 `SeTcb`（`WTSQueryUserToken`）、`SeLoadDriver`（wintun /
+    WinDivert）、`SeChangeNotify`、`SeCreateGlobal`（C-SEC-06）。**待验证**：虚拟机里确认 TUN 在收窄后的令牌下可用。
 - node.import 的支持范围（近五年主流客户端通用、且 sing-box 1.14.4 支持；详见 `core-mgr::link` 模块文档）：
   `ss://`（SIP002 / 旧版整段 Base64，AEAD 与 2022 加密，插件 obfs-local / v2ray-plugin）、`vmess://`（v2rayN JSON，
   只收 AEAD）、`vless://` / `trojan://`（Xray 分享链接标准，含 REALITY 与 Vision）、`hysteria2://` / `hy2://`、`tuic://`（v5）、
   `anytls://`、`socks(5)://`、`http(s)://`；订阅内容支持纯文本、整体 Base64 与 SIP008 JSON。不收录 SSR、Hysteria 1、
   SS 流加密、VMess alterId > 0、xhttp / kcp / quic 传输、WireGuard、NaiveProxy、ShadowTLS；Hysteria2 的 `pinSHA256`
   无等价选项，拒绝而不是丢弃。分享链接与 URI / Base64 解析手写，未引入新依赖。
-  - 跳过原因是固定的原因代码（如 `unsupported_protocol`、`duplicate`），不回显输入；界面目前原样显示，
-    **待办**：在 `app/` 里按代码走 i18n 翻译（本次没有改前端，开发机上没有 pnpm 环境）。
+  - 跳过原因是固定的原因代码（如 `unsupported_protocol`、`duplicate`），不回显输入；界面按代码走 i18n 翻译
+    （`app/src/features/node/issues.ts`），未知代码原样显示。
   - 存储：`<配置根>\nodes.json`，参数明文、凭据按节点 DPAPI 加密后十六进制存放（C-SEC-04）；读失败时不覆盖。
     每个节点暂时就是一个 `single` 出站（标签 = 节点 id），节点组的增删改还没有 IPC 方法。
-  - **待定**：订阅拉取需要服务端 HTTP 客户端（新的运行时依赖，AGENTS 第 8 节第 2 条）；Clash / mihomo YAML
-    订阅需要 YAML 解析库，同样待确认后再接。
-- 服务启动后禁用多余令牌特权（C-SEC-06）尚未实现，随 T-056（sing-box 守护）一起做。
+  - 订阅（2026-10-29 定用 WinHTTP）：`platform-win::http` 封装系统 WinHTTP（TLS 由 Schannel 校验，不引入 HTTP / TLS
+    库），只由用户操作触发（C-SEC-08），上限 10 MB（C-SEC-07）。再次导入同一地址即刷新：内容没变的节点保留原 id。
+    订阅地址可能含令牌，加密落盘，只有 `scheme://host` 出现在日志、错误与界面里（C-SEC-04）。`nodes.json` 升到
+    格式 2（读到格式 1 视为没有订阅，下次写入即升级）。Clash / mihomo YAML 订阅仍不支持（需要 YAML 库，未定）。
+  - 测速 `node.test`：`NodeTestParams` 新增可选的 `url`（新增可选字段，协议版本不变）。测速地址由用户在设置里填写，
+    保存在界面偏好中，不内置任何地址，留空即不能测速（C-SEC-08、C-SEC-09）。服务每次调用临时启动一个**没有入站**的
+    sing-box（`config_gen::generate_probe`：只有直连与节点出站和控制 API，不建 TUN、不监听代理端口），经控制 API 的
+    `/proxies/{tag}/delay` 测速，16 个并行、单个 5 秒，测完即停；一次最多 64 个节点，界面分批调用，保证每次调用在
+    60 秒调用超时之内。**只接受 `https://`**：锁定的 sing-box 1.14.4 在这个接口上会把 `http://` 开头的地址悄悄换成
+    内置的默认测速地址（实测），既不是用户选的地址也违反 C-SEC-09；服务、`clash_api::fetch_delay` 与界面三处都拒绝。
+- T-056：sing-box 的配置经标准输入（`-c stdin`）交给内核，不写进 `run\` 目录：配置里有节点凭据明文，落盘会违反
+  C-SEC-04（优先于设计文档第 8 节的「写在 run\ 目录」）；`run\` 只作为 sing-box 的工作目录。版本锁在编译时嵌入
+  （`core-mgr::kernel_lock`），每次（重新）启动前校验安装目录里的 `sing-box.exe`，校验到进程创建完成之间以只读共享
+  持有文件；内核放进关闭即终止的作业对象，随服务退出（C-NET-06）。
+- T-071：WinDivert 2.2.2 锁在 `third_party/windivert/lock.json`（上游未公布哈希；发布包哈希与 SourceForge 镜像公布的
+  一致，驱动的 EV 签名有效，签名主体记录在该目录的 README，请维护者确认）。`fetch-deps` 一并拉取。服务运行时从安装
+  目录按完整路径加载 `WinDivert.dll`，加载前校验 DLL 与驱动的 SHA-256，驱动文件在使用期间以只读共享方式锁定，不能被
+  删除或替换（C-DRV-01、C-DRV-02）。打开句柄会加载驱动，相关测试在 `crates/intercept/tests/divert_vm.rs`，只在
+  `--features vm-tests` 时编译，必须在虚拟机里以管理员身份运行（C-TEST-04）；开发机上只测 DLL 加载与过滤器语法。
+  **待验证**：`WINDIVERT_ADDRESS` 里地址数组的字序（按 WinDivert 的 `ntoh` 助手推断为 `[0]` 最低位），由
+  `socket_layer_reports_this_process_connects` 在虚拟机里确认。
+- 桌面客户端（`app/src-tauri`，包名 `procroute-ui`）：只依赖 proto；一条长连接、断线每 2 秒重连并重放订阅。
+  外壳自己的事件 `shell:connection`（与服务的连接变化，界面据此清空服务端数据，C-UI-02）与 `shell:tray`（托盘点击）
+  不属于 IPC 协议，类型写在 `app/src/api/shell.ts`。托盘菜单由前端生成并下发（文案走 i18n，C-UI-04），外壳只处理
+  「显示主窗口」「退出」。CSP 不允许远程来源与内联脚本，允许内联样式（Radix 运行时插入 `<style>`，因此对
+  `style-src` 关闭 Tauri 的 nonce 注入）。应用命令登记在 app manifest，主窗口只授权实际用到的 4 个命令与事件监听。
+  - `cargo deny` 只审计 Windows 目标：只分发 Windows 产物；同时列 Linux 时 cargo-deny 会把「Windows 上才依赖插件」
+    与「插件在 Linux 上才依赖 zbus」拼在一起，误报 Tauri 的 GTK / D-Bus 依赖。
+  - **已知风险**：服务未运行时，其他进程可以抢先创建同名管道冒充服务。界面只能依赖 proto（C-ARCH-02），
+    校验服务端身份（`GetNamedPipeServerProcessId` + 映像路径 / 签名）需要 FFI，要么走例外 ADR、要么由 proto 之外的
+    小模块提供，待确认。
+  - 修复：生产构建曾把模拟服务（含示例数据）打进包里（Vite 8 / Rolldown 不会跨函数判断 `import.meta.env.DEV`），
+    现在动态 import 直接放在 `DEV` 分支里，CI 检查生产构建产物。
+- T-095（配置生成部分）：`core-mgr::config_gen::generate_precise` 生成精确模式配置：一个回环 SOCKS5 入口
+  （随机端口与密码），每个进程组一个用户（用户名 = 组标签，与 relay 的握手一致），`auth_user` 路由到各组出站；
+  入口上未匹配任何组的连接最后一条规则拒绝，不直连（C-NET-03）。用锁定版本 `sing-box check` 回归，快照在
+  `crates/core-mgr/snapshots/precise_sample.json`。svc 的接线随 T-078。
+- T-092（2026-10-29 定为「两者都做」）：sing-box 1.13 起删除了入站的 `sniff_override_destination`（1.14.4 解析时
+  直接报错），规则动作里也没有替代，所以设计文档 6.3 的「用嗅探出的域名覆盖目标地址」改为：
+  1. 中继嗅探（`relay::sniff`）：在 Web 端口（默认 80 / 443）上先读客户端首包，取 TLS SNI / HTTP Host 后按域名发
+     SOCKS5 CONNECT，读到的字节在 CONNECT 后补发；取不到或 300 ms 超时就按原始 IP 连接。QUIC 暂不嗅探（可开
+     「阻断 QUIC」让应用回落 TCP）。TUN 模式没有中继，走系统解析的应用仍会拿到被污染的地址（已知局限）。
+  2. 远程 DNS（方案 schema 2 的 `dns.remote_server`）：用户填写 udp / tcp / tls / https 服务器，目标进程直发的
+     53 端口查询被劫持到内核，经该进程组的出站解析（每个出站一个服务器，`detour`）；TUN 按进程、精确模式按 SOCKS
+     用户匹配。不内置任何服务器地址（C-SEC-09）。精确模式下把目标进程的 UDP 53 交给中继，随 T-091 接入。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
 - sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的
   `curl.exe` / `tar.exe` 拉取，SHA256 用 Windows CNG（`platform-win::hash`，T-056 校验 sing-box 时复用），
@@ -98,8 +153,44 @@
   - TUN `dns_mode` 显式 `disabled`：1.14 开启 `auto_route` 时默认 `hijack`，等同系统 DNS 接管（C-NET-09）；
   - `urltest` 组的测速地址必须由用户配置，不使用 sing-box 内置的默认地址（C-SEC-08、C-SEC-09）；
   - TUN 模式下 `include_children` 不生效（sing-box 只按发起连接的进程判定）。
-  - **待处理（C-NET-03）**：sing-box 退出时 TUN 与路由随之撤销，目标进程会回落直连；需要在 T-056 守护进程里
-    补 fail-closed（例如对目标进程临时加阻断），否则 TUN 模式不满足 `fail_policy = block`。
+  - C-NET-03（2026-10-29 定为动态 WFP 过滤器）：sing-box 退出时 TUN 与路由随之撤销。`block` 策略的 TUN 会话在
+    内核启动前由 `svc::fail_closed` 装上过滤器（`platform-win::wfp`）：对每个目标可执行文件，本地地址在 TUN 网段内
+    放行，远端为回环 / 链路本地 / 组播放行，其余阻断；动态会话随服务退出自动删除（C-NET-06）。名称、目录、通配、
+    正则规则由进程追踪（T-079）跟进：启动时快照一遍，之后靠 ETW 进程事件（约 100 ms），ETW 不可用时每 500 ms
+    快照一次。**已知窗口**：内核不在、命中进程刚启动而事件还没送到的这段时间没有保护。只保护自身命中规则的可执行
+    文件（TUN 模式下继承不生效）。过滤器装不上则不启动会话（`session.fail_closed_unsupported`）。
+    **待验证**：`crates/platform-win/tests/wfp_vm.rs` 在虚拟机里以管理员身份运行。
+- T-079：`procroute-procwatch`（新 crate）。`tree` 是跨平台的进程树：键为「PID + 创建时间」，同一 PID 出现更晚的
+  创建时间即按旧进程退出处理，更早的视为过时事件；判定用 `rules::inherit::decide_child`；目标集合的变化以
+  `Change::{Targeted, Released}` 交出（`inherited` 标出继承来的子进程），换方案时按创建时间顺序重判、只报变化。
+  `watcher`（Windows）在专用线程上持有进程树：先开 ETW 会话再拍快照（启动返回前完成第一次快照），之后由事件驱动，
+  每 30 s 用快照校正；事件队列满或会话被外部停掉时立即校正 / 退回每 500 ms 快照。不依赖 intercept（C-ARCH-02），
+  由 svc 接线：目前接到 TUN fail-closed 的 `WfpGuard`，精确模式的接线随 T-078 / T-094。
+  - ETW 的 unsafe 部分在 `platform-win::etw`（C-CODE-01）：订阅 `Microsoft-Windows-Kernel-Process` 的
+    `WINEVENT_KEYWORD_PROCESS`，负载按清单模板的定长前缀解码。**版本 3 起启动事件在 `CreateTime` 前插入了
+    `ProcessSequenceNumber`**，偏移表按 (事件 id, 版本) 区分，单元测试读本机清单（`Get-WinEvent -ListProvider`，
+    不需要管理员）核对。`platform-win::process` 新增 `process_creation_time` 与核对创建时间的
+    `process_image_path_checked`；快照里的路径展开 8.3 短名（C-DRV-04）。
+  - 文件划分与原计划不同：ETW 的消费在 `platform-win::etw`，procwatch 里是 `tree.rs`、`snapshot.rs`、`watcher.rs`。
+  - 管理员终端的测试（`cargo nextest run -p procroute-platform-win -p procroute-procwatch --features admin-tests`：
+    真实 ETW 事件、事件里的创建时间与 `GetProcessTimes` 一致、残留会话替换、1 秒内继承）2026-10-29 已全部通过。
+    **待验证**：服务启动后会移除大部分令牌特权（只留 SeTcb / SeLoadDriver / SeChangeNotify / SeCreateGlobal），
+    ETW 会话在这种令牌下能否启动要在虚拟机里看服务日志确认；启动不了时退回快照并记一条 warn，不影响功能。
+- T-112：新增读方法 `diag.export`（返回 `proto::diag::DiagReport`，新增方法，协议版本不变）。服务端
+  `svc::diag` 收集版本与系统信息（`platform-win::os` 读注册表里的系统版本与内存完整性开关）、安装目录里
+  sing-box 与版本锁的比对、会话状态、方案、节点概况和 `logs\svc.log` 末尾 512 KiB；任何一部分读不出只记进
+  `problems`，不影响导出。整份报告控制在一条 IPC 消息以内（C-SEC-03），超出时从最旧的日志行丢起。
+  - 脱敏（C-SEC-04，`svc::diag::redact`）：不导出凭据、订阅地址、节点名称与地址（只留端口），节点只列方案用到的，
+    其余按协议计数；日志逐行把登记过的节点地址 / TLS 服务器名 / 凭据 / 订阅地址换成占位符（短的只按整词），
+    凭据样式字段（与界面 `features/log/redact.ts` 同一组关键词）的值换成 `***`，公网 IP 换成 `<ip>`（回环、
+    私有、链路本地、100.64/10、198.18/15 保留），`\Users\<名字>` 换成 `<user>`；方案规则里的用户名同样处理，
+    远程 DNS 服务器只留协议。
+  - 保存：报告不经过 WebView。外壳命令 `diag_export`（`app/src-tauri/src/diag.rs`）调用 `diag.export`，加上界面
+    版本，以 `procroute-diag-<UTC 时间>.json` 新建在当前用户的「下载」文件夹（只新建、不覆盖），把路径交给界面
+    显示。没有用保存对话框：那需要新增 `tauri-plugin-dialog` 依赖（AGENTS 第 8 节第 2 条）。失败分「服务」与
+    「存盘」两类，界面分别提示。不在桌面外壳里时设置页不显示入口。
+  - 产出文件与原计划不同：除 `svc/src/diag.rs` 与 `features/settings/*` 外，还改了 proto、platform-win 与外壳。
+  - WinDivert 文件与锁的比对随 T-078（svc 接入 intercept）补上。
 
 ## 阶段 M0 — 脚手架与可跨平台内核（第 1–2 周）
 

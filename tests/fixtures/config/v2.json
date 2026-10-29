@@ -1,0 +1,51 @@
+{
+  "schema_version": 2,
+  "id": "01JBX7Q3K2M8T5W9Y4C6N0R2QA",
+  "name": "游戏加速（远程 DNS）",
+  "mode": "precise",
+  "fail_policy": "block",
+  "dns": {
+    "strategy": "sniff",
+    "hijack_port53": true,
+    "remote_server": "tls://198.51.100.53:853"
+  },
+  "udp": {
+    "enabled": true,
+    "block_quic": false
+  },
+  "groups": [
+    {
+      "tag": "game",
+      "outbound": "hk-auto",
+      "include_children": true,
+      "match": [
+        {
+          "type": "dir",
+          "value": "D:\\Games\\MyGame",
+          "recursive": true
+        },
+        {
+          "type": "name",
+          "value": "launcher.exe"
+        }
+      ]
+    },
+    {
+      "tag": "browser",
+      "outbound": "us-01",
+      "include_children": false,
+      "match": [
+        {
+          "type": "path",
+          "value": "C:\\Program Files\\Mozilla Firefox\\firefox.exe"
+        }
+      ]
+    }
+  ],
+  "exclude": [
+    {
+      "type": "name",
+      "value": "updater.exe"
+    }
+  ]
+}

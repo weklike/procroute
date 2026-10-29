@@ -12,6 +12,7 @@ use ts_rs::{Config, TS, TypeVisitor};
 use crate::IPC_PROTOCOL_VERSION;
 use crate::error::{ErrorCode, IpcError};
 use crate::methods::{self, METHODS};
+use crate::profile::PROFILE_SCHEMA_VERSION;
 
 /// 生成文件的完整内容。
 pub fn typescript_bindings() -> String {
@@ -36,6 +37,10 @@ pub fn typescript_bindings() -> String {
     let _ = writeln!(
         out,
         "export const IPC_PROTOCOL_VERSION = {IPC_PROTOCOL_VERSION};\n"
+    );
+    let _ = writeln!(
+        out,
+        "export const PROFILE_SCHEMA_VERSION = {PROFILE_SCHEMA_VERSION};\n"
     );
 
     for decl in collector.decls.values() {
@@ -113,6 +118,7 @@ mod tests {
             "\"profile.save\": Profile;",
             "\"conn.subscribe\": ConnEvent;",
             "export const IPC_PROTOCOL_VERSION = 1;",
+            "export const PROFILE_SCHEMA_VERSION = 2;",
         ] {
             assert!(ts.contains(needle), "missing `{needle}` in:\n{ts}");
         }

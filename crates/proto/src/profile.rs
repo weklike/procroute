@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// 当前方案的 schema 版本。结构变更必须加一并提供迁移（C-ARCH-06）。
-pub const PROFILE_SCHEMA_VERSION: u32 = 1;
+///
+/// - 2：`dns.remote_server`（用户配置的远程 DNS 服务器）。
+pub const PROFILE_SCHEMA_VERSION: u32 = 2;
 
 /// 工作模式。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -50,6 +52,11 @@ pub struct DnsSettings {
     /// 劫持目标进程自己发往 53 端口的查询。
     #[serde(default = "default_true")]
     pub hijack_port53: bool,
+    /// 远程 DNS 服务器（v2 起）：被劫持的查询经该进程组的出站交给它解析，绕开本地被污染的结果。
+    /// 形如 `udp://`、`tcp://`、`tls://`、`https://` 地址，例如 `tls://198.51.100.53` 或
+    /// `https://dns.example/dns-query`。由用户配置，软件不内置任何服务器（C-SEC-09）；为空时不劫持。
+    #[serde(default)]
+    pub remote_server: Option<String>,
 }
 
 impl Default for DnsSettings {
@@ -57,6 +64,7 @@ impl Default for DnsSettings {
         Self {
             strategy: DnsStrategy::default(),
             hijack_port53: true,
+            remote_server: None,
         }
     }
 }
