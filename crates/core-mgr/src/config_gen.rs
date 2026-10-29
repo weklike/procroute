@@ -8,7 +8,10 @@
 //! 转进来：用户名是进程组标签，`auth_user` 规则把它路由到该组的出站；入口上没有匹配到任何进程组的
 //! 连接一律拒绝，绝不直连（C-NET-03）。入口上的连接都做协议嗅探，连接面板因此能显示域名。
 //! 1.14 已删除「用嗅探出的域名覆盖目标地址」（`sniff_override_destination`，规则动作里没有替代），
-//! 设计文档 6.3 的「让远端重新解析」需要另找做法（T-092，见 TASKS.md）。
+//! 设计文档 6.3 的「让远端重新解析」改由本地中继在发 CONNECT 前嗅探完成（`procroute-relay::sniff`）。
+//!
+//! 两种模式都支持用户配置的远程 DNS 服务器（[`dns`] 子模块）：目标进程直发的 53 端口查询被劫持到内核，
+//! 经该进程组的出站解析。
 //!
 //! TUN 入站的几处取值有硬约束背景：
 //!
@@ -36,6 +39,8 @@ use thiserror::Error;
 
 use crate::node::{Credentials, Node, NodeError};
 use crate::{outbound, process_regex};
+
+mod dns;
 
 /// 直连出站的标签（保留）。
 pub const DIRECT_TAG: &str = "direct";
@@ -173,11 +178,12 @@ pub fn generate_tun(
     }
     check_runtime(runtime)?;
     let outbounds = outbounds(profile, nodes, groups)?;
-    let rules = route_rules(profile, runtime)?;
+    let remote = dns::plan(profile)?;
+    let (rules, dns_rules) = route_rules(profile, runtime, remote.as_ref())?;
 
     let config = json!({
         "log": log_options(),
-        "dns": local_dns(),
+        "dns": dns::section(remote.as_ref(), dns_rules),
         "inbounds": [ {
             "type": "tun",
             "tag": TUN_INBOUND_TAG,
@@ -227,7 +233,16 @@ pub fn generate_precise(
         .map(|g| json!({ "username": g.tag, "password": socks.password.expose() }))
         .collect();
 
+    let remote = dns::plan(profile)?;
     let mut rules = vec![json!({ "inbound": [SOCKS_INBOUND_TAG], "action": "sniff" })];
+    let mut dns_rules = Vec::new();
+    if let Some(remote) = &remote {
+        // 中继转来的 53 端口查询交给内核的 DNS，按 SOCKS 用户（进程组）选远程服务器
+        rules.push(json!({ "inbound": [SOCKS_INBOUND_TAG], "port": 53, "action": "hijack-dns" }));
+        dns_rules.extend(profile.groups.iter().map(|g| {
+            json!({ "auth_user": [g.tag], "action": "route", "server": remote.server_for(&g.outbound) })
+        }));
+    }
     if profile.udp.block_quic {
         // 拦截层（T-093）已经丢弃目标进程的 UDP 443，这里再兜一层
         rules.push(json!({
@@ -245,7 +260,7 @@ pub fn generate_precise(
 
     let config = json!({
         "log": log_options(),
-        "dns": local_dns(),
+        "dns": dns::section(remote.as_ref(), dns_rules),
         "inbounds": [ {
             "type": "socks",
             "tag": SOCKS_INBOUND_TAG,
@@ -268,13 +283,6 @@ pub fn generate_precise(
 
 fn log_options() -> Value {
     json!({ "level": "warn", "timestamp": true })
-}
-
-fn local_dns() -> Value {
-    json!({
-        "servers": [ { "type": "local", "tag": LOCAL_DNS_TAG } ],
-        "final": LOCAL_DNS_TAG,
-    })
 }
 
 fn clash_api(runtime: &Runtime) -> Value {
@@ -415,8 +423,13 @@ fn group(g: &GroupOutbound, nodes: &HashMap<&str, &NodeOutbound>) -> Result<Valu
     })
 }
 
-/// 路由规则，顺序即优先级：永久直连 → 自身进程 → 排除 → QUIC 阻断 → UDP 不代理 → 各进程组。
-fn route_rules(profile: &Profile, runtime: &Runtime) -> Result<Vec<Value>, GenError> {
+/// 路由规则，顺序即优先级：永久直连 → 自身进程 → 排除 → 劫持 DNS → QUIC 阻断 → UDP 不代理 → 各进程组。
+/// 同时返回远程 DNS 的规则（与进程组同样的优先级展开）。
+fn route_rules(
+    profile: &Profile,
+    runtime: &Runtime,
+    remote: Option<&dns::RemoteDns>,
+) -> Result<(Vec<Value>, Vec<Value>), GenError> {
     let mut rules =
         vec![json!({ "ip_cidr": ALWAYS_DIRECT_CIDRS, "action": "route", "outbound": DIRECT_TAG })];
 
@@ -458,6 +471,11 @@ fn route_rules(profile: &Profile, runtime: &Runtime) -> Result<Vec<Value>, GenEr
     }
     let all_targets: Vec<String> = tiers.iter().flatten().flatten().cloned().collect();
     if !all_targets.is_empty() {
+        if remote.is_some() {
+            rules.push(json!({
+                "process_path_regex": all_targets, "port": 53, "action": "hijack-dns",
+            }));
+        }
         if profile.udp.block_quic {
             rules.push(json!({
                 "process_path_regex": all_targets, "network": "udp", "port": 443, "action": "reject",
@@ -469,18 +487,28 @@ fn route_rules(profile: &Profile, runtime: &Runtime) -> Result<Vec<Value>, GenEr
             }));
         }
     }
+    let mut dns_rules = Vec::new();
     for tier in &tiers {
         for (gi, regexes) in tier.iter().enumerate() {
-            if !regexes.is_empty() {
-                rules.push(json!({
+            if regexes.is_empty() {
+                continue;
+            }
+            let outbound = &profile.groups[gi].outbound;
+            rules.push(json!({
+                "process_path_regex": regexes,
+                "action": "route",
+                "outbound": outbound,
+            }));
+            if let Some(remote) = remote {
+                dns_rules.push(json!({
                     "process_path_regex": regexes,
                     "action": "route",
-                    "outbound": profile.groups[gi].outbound,
+                    "server": remote.server_for(outbound),
                 }));
             }
         }
     }
-    Ok(rules)
+    Ok((rules, dns_rules))
 }
 
 fn translate(

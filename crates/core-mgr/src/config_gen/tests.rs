@@ -645,7 +645,7 @@ mod sing_box_check {
         exe
     }
 
-    fn check(config: &str, name: &str) -> (bool, String) {
+    pub(super) fn check(config: &str, name: &str) -> (bool, String) {
         let dir = std::env::temp_dir().join(format!("procroute-core-mgr-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(format!("{name}.json"));
@@ -744,3 +744,5 @@ mod sing_box_check {
         assert!(!ok);
     }
 }
+
+mod dns;
