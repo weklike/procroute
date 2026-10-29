@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import LatencyUrlForm from '@/features/node/LatencyUrlForm'
 import DriverPanel from '@/features/session/DriverPanel'
 import { useAutostart } from '@/features/shell/api'
 import { SUPPORTED_LANGUAGES, type Language } from '@/i18n'
@@ -82,6 +83,15 @@ export default function SettingsPage() {
             />
           </div>
         ) : null}
+      </section>
+      <section
+        aria-labelledby="settings-latency"
+        className="bg-card flex max-w-2xl flex-col gap-4 rounded-xl border p-5"
+      >
+        <h2 id="settings-latency" className="text-[15px] font-semibold">
+          {t('settings.latencyTitle')}
+        </h2>
+        <LatencyUrlForm />
       </section>
       <DriverPanel />
     </>

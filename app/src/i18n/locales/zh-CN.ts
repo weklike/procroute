@@ -180,6 +180,8 @@ const zhCN = {
     importLinks: '导入分享链接',
     testAll: '全部测速',
     testing: '测速中…',
+    testNeedsUrl: '测速前先在设置中填写测速地址。',
+    goToSettings: '前往设置',
     addSubscription: '添加订阅',
     subscriptionsTitle: '订阅',
     noSubscriptions: '还没有订阅',
@@ -343,6 +345,13 @@ const zhCN = {
     themes: { system: '跟随系统', light: '浅色', dark: '深色' },
     autostart: '开机自启',
     autostartHint: '登录 Windows 后在托盘中启动，不弹出主窗口',
+    latencyTitle: '节点测速',
+    latencyUrl: '测速地址',
+    latencyUrlHint:
+      'ProcRoute 不内置测速地址。填写一个 https 地址（例如返回 204 的页面），测速时经每个节点访问它并计时；留空则无法测速。',
+    latencyUrlInvalid: '请填写以 https:// 开头的地址，不超过 2048 个字符',
+    save: '保存',
+    saved: '已保存',
   },
   tray: {
     tooltipIdle: 'ProcRoute：未启动会话',

@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { call } from '@/api/client'
-import type { NodeImportParams, NodeTestParams } from '@/api/generated'
+import type { LatencyResult, NodeImportParams } from '@/api/generated'
 
 export const nodeKeys = {
   all: ['node'] as const,
@@ -23,7 +23,25 @@ export function useImportNodes() {
   })
 }
 
+/** 服务一次最多测的节点数；更多的节点分批依次测，每批都在调用超时之内结束。 */
+export const TEST_BATCH = 64
+
+export type TestNodesParams = {
+  ids: string[]
+  /** 用户在设置里填写的测速地址。 */
+  url: string
+}
+
 /** 测延迟；结果保存在 mutation 状态里，由页面传给列表。 */
 export function useTestNodes() {
-  return useMutation({ mutationFn: (p: NodeTestParams) => call('node.test', p) })
+  return useMutation({
+    mutationFn: async ({ ids, url }: TestNodesParams) => {
+      const results: LatencyResult[] = []
+      for (let i = 0; i < ids.length; i += TEST_BATCH) {
+        const batch = await call('node.test', { ids: ids.slice(i, i + TEST_BATCH), url })
+        results.push(...batch.results)
+      }
+      return { results }
+    },
+  })
 }

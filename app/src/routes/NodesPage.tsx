@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import { Link } from '@tanstack/react-router'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -12,11 +13,13 @@ import NodeTable from '@/features/node/NodeTable'
 import OutboundCards from '@/features/node/OutboundCards'
 import SubscriptionList from '@/features/node/SubscriptionList'
 import { errorText } from '@/lib/errors'
+import { useUiStore } from '@/stores/ui'
 
 export default function NodesPage() {
   const { t } = useTranslation()
   const nodes = useNodes()
   const test = useTestNodes()
+  const testUrl = useUiStore((s) => s.latencyTestUrl)
   const latencies = useMemo(
     () => new Map((test.data?.results ?? []).map((r) => [r.id, r])),
     [test.data],
@@ -32,8 +35,12 @@ export default function NodesPage() {
             <ImportLinksDialog />
             <Button
               variant="outline"
-              disabled={test.isPending || !nodes.data}
-              onClick={() => test.mutate({ ids: [] })}
+              disabled={test.isPending || !nodes.data || nodes.data.nodes.length === 0 || !testUrl}
+              onClick={() => {
+                if (nodes.data) {
+                  test.mutate({ ids: nodes.data.nodes.map((n) => n.id), url: testUrl })
+                }
+              }}
             >
               {test.isPending ? t('node.testing') : t('node.testAll')}
             </Button>
@@ -46,6 +53,14 @@ export default function NodesPage() {
         <Alert variant="destructive">
           <AlertDescription>{errorText(t, nodes.error)}</AlertDescription>
         </Alert>
+      ) : null}
+      {!testUrl && nodes.data && nodes.data.nodes.length > 0 ? (
+        <p className="text-muted-foreground text-[13px]">
+          {t('node.testNeedsUrl')}{' '}
+          <Link to="/settings" className="text-primary underline-offset-4 hover:underline">
+            {t('node.goToSettings')}
+          </Link>
+        </p>
       ) : null}
       {test.isError ? (
         <Alert variant="destructive">

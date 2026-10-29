@@ -273,16 +273,27 @@ export function createMockService(): MockService {
       return { added: 0, skipped: 0, issues: [] }
     },
     'node.list': () => ({ nodes, outbounds, subscriptions }),
-    'node.test': ({ ids }) => ({
-      results: (ids.length > 0 ? ids : nodes.map((n) => n.id)).map((id, i) => {
-        const timedOut = i % 5 === 2
-        return {
-          id,
-          latency_ms: timedOut ? null : 30 + ((i * 47) % 260),
-          timed_out: timedOut,
-        }
-      }),
-    }),
+    'node.test': ({ ids, url }) => {
+      // 与服务一致：测速地址由用户填写，一次最多 64 个节点
+      if (!url || !/^https:\/\/\S+$/.test(url)) {
+        fail('ipc.invalid_params', 'set a latency test URL first')
+      }
+      const targets = ids.length > 0 ? [...new Set(ids)] : nodes.map((n) => n.id)
+      if (targets.some((id) => !nodes.some((n) => n.id === id))) {
+        fail('node.not_found', 'node not found')
+      }
+      if (targets.length > 64) fail('ipc.invalid_params', 'at most 64 nodes per call')
+      return {
+        results: targets.map((id, i) => {
+          const timedOut = i % 5 === 2
+          return {
+            id,
+            latency_ms: timedOut ? null : 30 + ((i * 47) % 260),
+            timed_out: timedOut,
+          }
+        }),
+      }
+    },
     'process.list': () => ({ processes: PROCESSES }),
     'conn.subscribe': () => ({}),
     'log.subscribe': () => ({}),

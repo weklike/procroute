@@ -196,6 +196,8 @@ const enUS: Messages = {
     importLinks: 'Import share links',
     testAll: 'Test all',
     testing: 'Testing…',
+    testNeedsUrl: 'Set a latency test URL in Settings before testing.',
+    goToSettings: 'Open Settings',
     addSubscription: 'Add subscription',
     subscriptionsTitle: 'Subscriptions',
     noSubscriptions: 'No subscriptions yet',
@@ -370,6 +372,13 @@ const enUS: Messages = {
     themes: { system: 'System', light: 'Light', dark: 'Dark' },
     autostart: 'Start at sign-in',
     autostartHint: 'Starts in the tray after you sign in to Windows, without opening the window',
+    latencyTitle: 'Latency test',
+    latencyUrl: 'Test URL',
+    latencyUrlHint:
+      'ProcRoute has no built-in test URL. Enter an https URL (for example a page that returns 204); each node is timed fetching it. Leave empty to disable testing.',
+    latencyUrlInvalid: 'Enter a URL starting with https://, at most 2048 characters',
+    save: 'Save',
+    saved: 'Saved',
   },
   tray: {
     tooltipIdle: 'ProcRoute: no session',

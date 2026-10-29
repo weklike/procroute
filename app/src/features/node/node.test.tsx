@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { screen, waitFor, within } from '@testing-library/react'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { renderHook, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { LatencyResult, NodeInfo } from '@/api/generated'
 import { mockCall } from '@/test/ipc'
 import { useFakeViewport } from '@/test/layout'
-import { renderWithQuery } from '@/test/render'
+import { renderWithQuery, testQueryClient } from '@/test/render'
 
 vi.mock('@/api/client', async (orig) => ({
   ...(await orig<typeof import('@/api/client')>()),
@@ -18,6 +19,7 @@ const { call } = await import('@/api/client')
 const { default: ImportLinksDialog } = await import('./ImportLinksDialog')
 const { default: AddSubscriptionDialog } = await import('./AddSubscriptionDialog')
 const { default: NodeTable } = await import('./NodeTable')
+const { TEST_BATCH, useTestNodes } = await import('./api')
 
 beforeEach(() => {
   vi.mocked(call).mockReset()
@@ -143,5 +145,32 @@ describe('NodeTable', () => {
   it('shows an empty state', () => {
     renderWithQuery(<NodeTable nodes={[]} outbounds={[]} latencies={new Map()} />)
     expect(screen.getByText(/还没有节点/)).toBeInTheDocument()
+  })
+})
+
+describe('useTestNodes', () => {
+  it('tests large lists in batches with the configured URL', async () => {
+    const testSpy = vi.fn(({ ids }: { ids: string[] }) => ({
+      results: ids.map((id) => ({ id, latency_ms: 10, timed_out: false })),
+    }))
+    mockCall(call, { 'node.test': testSpy })
+    const client = testQueryClient()
+    const { result } = renderHook(() => useTestNodes(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+    const ids = Array.from({ length: TEST_BATCH * 2 + 1 }, (_, i) => `n${i}`)
+    result.current.mutate({ ids, url: 'https://127.0.0.1/generate_204' })
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true)
+    })
+    expect(testSpy).toHaveBeenCalledTimes(3)
+    expect(testSpy.mock.calls.map(([p]) => p.ids.length)).toEqual([TEST_BATCH, TEST_BATCH, 1])
+    expect(testSpy).toHaveBeenCalledWith({
+      ids: ids.slice(0, TEST_BATCH),
+      url: 'https://127.0.0.1/generate_204',
+    })
+    expect(result.current.data?.results.map((r) => r.id)).toEqual(ids)
   })
 })
