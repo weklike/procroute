@@ -9,6 +9,7 @@
     "allow-ipc-call",
     "allow-tray-update",
     "allow-autostart-get",
-    "allow-autostart-set"
+    "allow-autostart-set",
+    "allow-diag-export"
   ]
 }

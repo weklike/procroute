@@ -352,6 +352,13 @@ const zhCN = {
     latencyUrlInvalid: '请填写以 https:// 开头的地址，不超过 2048 个字符',
     save: '保存',
     saved: '已保存',
+    diagTitle: '诊断包',
+    diagHint:
+      '把服务日志、方案与运行环境导出成一个文件，便于排查问题或附在问题报告里。导出时会去掉凭据、订阅地址、节点名称与地址、公网 IP 和用户名；分享前仍请自己看一遍。',
+    diagExport: '导出诊断包',
+    diagExporting: '正在导出…',
+    diagSaved: '已保存到「下载」文件夹：',
+    diagSaveFailed: '诊断包已生成，但无法保存到「下载」文件夹',
   },
   tray: {
     tooltipIdle: 'ProcRoute：未启动会话',

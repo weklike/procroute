@@ -379,6 +379,13 @@ const enUS: Messages = {
     latencyUrlInvalid: 'Enter a URL starting with https://, at most 2048 characters',
     save: 'Save',
     saved: 'Saved',
+    diagTitle: 'Diagnostics',
+    diagHint:
+      'Export the service log, profiles and environment into one file for troubleshooting or to attach to a bug report. Credentials, subscription URLs, node names and addresses, public IPs and user names are removed; please still look it over before sharing.',
+    diagExport: 'Export diagnostics',
+    diagExporting: 'Exporting…',
+    diagSaved: 'Saved to your Downloads folder:',
+    diagSaveFailed: 'The report was created but could not be saved to your Downloads folder',
   },
   tray: {
     tooltipIdle: 'ProcRoute: no session',

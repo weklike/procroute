@@ -13,6 +13,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import LatencyUrlForm from '@/features/node/LatencyUrlForm'
 import DriverPanel from '@/features/session/DriverPanel'
+import DiagnosticsCard from '@/features/settings/DiagnosticsCard'
 import { useAutostart } from '@/features/shell/api'
 import { SUPPORTED_LANGUAGES, type Language } from '@/i18n'
 import { useUiStore, type Theme } from '@/stores/ui'
@@ -94,6 +95,7 @@ export default function SettingsPage() {
         <LatencyUrlForm />
       </section>
       <DriverPanel />
+      <DiagnosticsCard />
     </>
   )
 }

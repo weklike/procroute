@@ -7,7 +7,8 @@
 //! - 托盘菜单由前端用 `tray_update` 下发：文案来自前端的 i18n 资源（C-UI-04），
 //!   点击后外壳只处理「显示主窗口」「退出」，其余菜单项发 [`TRAY_EVENT`] 交给前端
 //!   （启动 / 停止会话、切换方案都走前端已有的 IPC 调用）；
-//! - `autostart_*`：开机自启写当前用户的 Run 键，自启时带 [`MINIMIZED_ARG`]，只进托盘不弹窗。
+//! - `autostart_*`：开机自启写当前用户的 Run 键，自启时带 [`MINIMIZED_ARG`]，只进托盘不弹窗；
+//! - `diag_export`：见 [`crate::diag`]。
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WindowEvent, Wry};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
+use crate::diag;
 use crate::ipc::{CallError, Client, Outbound, PIPE_NAME};
 
 /// 主窗口标签，与 `tauri.conf.json` 一致。
@@ -56,7 +58,8 @@ pub fn run() {
             ipc_call,
             tray_update,
             autostart_get,
-            autostart_set
+            autostart_set,
+            diag::diag_export
         ])
         .setup(|app| {
             let handle = app.handle().clone();

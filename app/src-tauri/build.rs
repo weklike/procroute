@@ -5,7 +5,13 @@
 //! 而不是默认对所有窗口开放（C-SEC-10）。
 
 /// 前端可以调用的全部应用命令。新增命令时同时在 `capabilities/main.json` 里授权。
-const COMMANDS: &[&str] = &["ipc_call", "tray_update", "autostart_get", "autostart_set"];
+const COMMANDS: &[&str] = &[
+    "ipc_call",
+    "tray_update",
+    "autostart_get",
+    "autostart_set",
+    "diag_export",
+];
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {

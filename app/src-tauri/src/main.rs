@@ -5,11 +5,14 @@
 //! （C-ARCH-02），所有服务端操作都经控制管道交给 `procroute-svc`。界面本身在 `app/src/`。
 //!
 //! - [`ipc`]：控制管道客户端（握手、请求配对、通知转发、断线重连与订阅重放）；
-//! - [`shell`]：Tauri 命令、主窗口、托盘与开机自启。
+//! - [`shell`]：Tauri 命令、主窗口、托盘与开机自启；
+//! - [`diag`]：把服务生成的诊断包存进「下载」文件夹。
 #![forbid(unsafe_code)]
 // 发布构建不弹控制台窗口
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod diag;
 #[cfg(windows)]
 mod ipc;
 #[cfg(windows)]
