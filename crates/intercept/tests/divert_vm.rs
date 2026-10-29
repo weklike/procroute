@@ -16,9 +16,13 @@ use std::time::{Duration, Instant};
 
 use procroute_intercept::divert::ffi::{Address, Layer, Param, Shutdown, WinDivert, event, flags};
 
+/// `PROCROUTE_WINDIVERT_DIR`（`cargo xtask sandbox-test` 在沙盒里设置），否则用仓库里的 `bin/`。
 fn load() -> Arc<WinDivert> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../third_party/windivert/bin")
+    let dir = std::env::var_os("PROCROUTE_WINDIVERT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/windivert/bin")
+        })
         .canonicalize()
         .expect("run `cargo xtask fetch-deps` first");
     WinDivert::load(&dir).expect("load the locked WinDivert")
