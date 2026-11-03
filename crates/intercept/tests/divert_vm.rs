@@ -9,12 +9,23 @@
 //! 默认构建不编译本文件（不是跳过：开发机与 CI 宿主上禁止加载驱动）。
 #![cfg(all(windows, feature = "vm-tests"))]
 
-use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use procroute_intercept::divert::ffi::{Address, Layer, Param, Shutdown, WinDivert, event, flags};
+use procroute_intercept::divert::socket::{
+    Attributor, FlowTable, ProcessResolver, SocketMonitor, SystemProcesses, TargetAction,
+};
+use procroute_intercept::{Counters, ExclusionSet, FlowPolicy, InterceptSettings, ProcessKey};
+use procroute_proto::event::Network;
+
+/// 文档用地址（TEST-NET-1，RFC 5737）：没有人应答，connect 一直挂到超时。
+const UNANSWERED: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+/// 设置后，[`child_connect_helper`] 连接这个地址（子进程入口）。
+const CHILD_ENV: &str = "PROCROUTE_VM_CHILD_CONNECT";
 
 /// `PROCROUTE_WINDIVERT_DIR`（`cargo xtask sandbox-test` 在沙盒里设置），否则用仓库里的 `bin/`。
 fn load() -> Arc<WinDivert> {
@@ -72,4 +83,121 @@ fn socket_layer_reports_this_process_connects() {
             break;
         }
     }
+}
+
+/// 只把 `target` 当作目标进程（进程组 3），并记下每次被问到的进程。
+struct Recorder {
+    target: ProcessKey,
+    asked: Mutex<Vec<ProcessKey>>,
+}
+
+impl FlowPolicy for Recorder {
+    fn target_group(&self, p: &ProcessKey) -> Option<u16> {
+        self.asked.lock().expect("recorder lock").push(*p);
+        (*p == self.target).then_some(3)
+    }
+}
+
+/// 子进程入口：设置了 [`CHILD_ENV`] 时连接那个地址；作为普通测试运行时什么也不做。
+#[test]
+fn child_connect_helper() {
+    if let Ok(addr) = std::env::var(CHILD_ENV) {
+        let addr: SocketAddr = addr.parse().expect("child address");
+        let _ = TcpStream::connect_timeout(&addr, Duration::from_secs(3));
+    }
+}
+
+fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn socket_monitor_registers_only_target_connects() {
+    let wd = load();
+    let me = SystemProcesses
+        .resolve(std::process::id())
+        .expect("resolve this process");
+    let policy = Arc::new(Recorder {
+        target: me,
+        asked: Mutex::new(Vec::new()),
+    });
+    let table = Arc::new(FlowTable::default());
+    let counters = Arc::new(Counters::default());
+    let attributor = Arc::new(Attributor::new(
+        InterceptSettings::default(),
+        ExclusionSet::default(),
+        policy.clone(),
+        Arc::new(SystemProcesses),
+        table.clone(),
+        counters.clone(),
+    ));
+    let monitor = SocketMonitor::start(&wd, attributor).expect("start the SOCKET layer monitor");
+
+    // 目标进程（本测试进程）：connect 挂起期间已经登记
+    let target_remote = SocketAddr::from((UNANSWERED, 9));
+    let pending = std::thread::spawn(move || {
+        TcpStream::connect_timeout(&target_remote, Duration::from_secs(3))
+    });
+    let find = |remote: SocketAddr| table.entries().into_iter().find(|f| f.key.remote == remote);
+    wait_until(
+        "the target connect to be registered",
+        Duration::from_secs(5),
+        || find(target_remote).is_some(),
+    );
+    let flow = find(target_remote).expect("registered");
+    assert_eq!(flow.process, me);
+    assert_eq!(flow.action, TargetAction::Redirect { group: 3 });
+    assert_eq!(flow.key.network, Network::Tcp);
+    assert_ne!(flow.key.local.port(), 0, "{flow:?}");
+    assert!(!flow.key.local.ip().is_loopback(), "{flow:?}");
+
+    // 非目标进程（子进程）：事件被看到、被判定，但不登记（C-NET-02）
+    let other_remote = SocketAddr::from((UNANSWERED, 10));
+    let mut child = Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", "child_connect_helper", "--test-threads=1"])
+        .env(CHILD_ENV, other_remote.to_string())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn the child");
+    let child_pid = child.id();
+    wait_until(
+        "the child's connect to be attributed",
+        Duration::from_secs(5),
+        || {
+            policy
+                .asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.pid == child_pid)
+        },
+    );
+    assert!(find(other_remote).is_none(), "{:?}", table.entries());
+    assert!(
+        table.entries().iter().all(|f| f.process.pid != child_pid),
+        "{:?}",
+        table.entries()
+    );
+    assert!(child.wait().expect("wait for the child").success());
+
+    // 连接超时、套接字关闭后，CLOSE 事件撤销登记
+    let result = pending.join().expect("connect thread");
+    assert!(result.is_err(), "nobody should answer at {target_remote}");
+    wait_until(
+        "the closed socket to be forgotten",
+        Duration::from_secs(5),
+        || find(target_remote).is_none(),
+    );
+
+    assert!(
+        counters.snapshot().redirected >= 1,
+        "{:?}",
+        counters.snapshot()
+    );
+    assert!(monitor.is_running(), "{:?}", monitor.failure());
+    monitor.stop();
 }
