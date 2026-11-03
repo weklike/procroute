@@ -91,6 +91,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | 构建桌面客户端 | `pnpm -C app tauri build --debug --no-bundle`（先跑前端生产构建，再编译 `procroute-ui.exe`；不出安装包） |
 | 打包安装包 | `cargo xtask bundle` |
 | 端到端测试 | `cargo xtask e2e --vm <name>`（只在 Hyper-V 虚拟机中运行） |
+| 虚拟机专属测试（驱动、WFP、管理员） | `cargo xtask sandbox-test [--only <测试名>] [--keep-open]`（在开发机上编译，在 Windows Sandbox 里运行；需要启用「Windows 沙盒」功能） |
 | 依赖与许可审计 | `cargo deny check` ；`pnpm -C app audit` |
 | 添加 shadcn/ui 组件 | `pnpm -C app dlx shadcn@latest add <component>` |
 
