@@ -24,7 +24,8 @@
 //! - `privileges`：服务启动后移除用不到的令牌特权（C-SEC-06，仅 Windows）；
 //! - `wfp`：TUN 模式 fail-closed 用的动态 WFP 过滤器（C-NET-03、C-NET-06，仅 Windows）；
 //! - `random`：系统 CSPRNG，生成每次启动的控制 API 密钥（T-056，C-NET-08，仅 Windows）；
-//! - `os`：系统版本与内存完整性开关，写进诊断包（T-112，仅 Windows）。
+//! - `os`：系统版本与内存完整性开关，写进诊断包（T-112，仅 Windows）；
+//! - `nettable`：按连接反查所属 PID，精确模式首包竞态的兜底（T-076，C-NET-04，仅 Windows）。
 
 pub mod secret;
 
@@ -46,6 +47,8 @@ pub mod http;
 pub mod job;
 #[cfg(windows)]
 pub mod library;
+#[cfg(windows)]
+pub mod nettable;
 #[cfg(windows)]
 pub mod os;
 #[cfg(windows)]

@@ -24,6 +24,7 @@ thiserror = "2.0.21"
 version = "0.61.2"
 features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_WindowsFilteringPlatform",
     "Win32_Networking_WinHttp",
     "Win32_Security",
