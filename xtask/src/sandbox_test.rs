@@ -32,7 +32,7 @@ struct Suite {
     test: &'static str,
 }
 
-const SUITES: [Suite; 5] = [
+const SUITES: [Suite; 6] = [
     Suite {
         package: "procroute-platform-win",
         features: "vm-tests",
@@ -57,6 +57,11 @@ const SUITES: [Suite; 5] = [
         package: "procroute-intercept",
         features: "vm-tests",
         test: "redirect_vm",
+    },
+    Suite {
+        package: "procroute-intercept",
+        features: "vm-tests",
+        test: "precise_vm",
     },
 ];
 
