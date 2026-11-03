@@ -128,12 +128,17 @@ fn the_filter_compiles_at_the_socket_layer() {
         .expect("SOCKET layer filter");
 }
 
-fn target(key: FlowKey, process: ProcessKey, group: u16) -> TargetFlow {
-    TargetFlow {
+fn record(key: FlowKey, process: ProcessKey, action: FlowAction) -> FlowRecord {
+    FlowRecord {
         key,
-        process,
-        action: TargetAction::Redirect { group },
+        pid: process.pid,
+        process: Some(process),
+        action,
     }
+}
+
+fn target(key: FlowKey, process: ProcessKey, group: u16) -> FlowRecord {
+    record(key, process, FlowAction::Redirect { group })
 }
 
 #[test]
@@ -157,7 +162,7 @@ fn table_registers_replaces_and_looks_up_by_port_and_remote() {
     assert_eq!(
         t.get(Network::Tcp, 50001, sock("203.0.113.24:443"))
             .map(|f| f.action),
-        Some(TargetAction::Redirect { group: 4 })
+        Some(FlowAction::Redirect { group: 4 })
     );
 
     assert_eq!(t.unregister(&k), Some(target(k, GAME, 4)));
@@ -175,6 +180,40 @@ fn table_handles_ipv6_remotes() {
         443,
     );
     assert!(t.get(Network::Tcp, 50001, remote).is_some());
+}
+
+#[test]
+fn the_first_syn_consumes_redirect_and_bypass_records_but_not_block() {
+    let t = FlowTable::default();
+    let redirect = tcp(50001, "203.0.113.24:443");
+    let bypass = tcp(50002, "203.0.113.24:443");
+    let block = tcp(50003, "203.0.113.24:443");
+    t.register(target(redirect, GAME, 1));
+    t.register(record(bypass, OTHER, FlowAction::Bypass));
+    t.register(record(block, GAME, FlowAction::Block));
+
+    assert_eq!(
+        t.take_for_syn(50001, redirect.remote),
+        Some(target(redirect, GAME, 1))
+    );
+    assert_eq!(t.take_for_syn(50001, redirect.remote), None);
+    assert_eq!(
+        t.take_for_syn(50002, bypass.remote).map(|r| r.action),
+        Some(FlowAction::Bypass)
+    );
+    assert_eq!(t.take_for_syn(50002, bypass.remote), None);
+    // 阻断的登记留着，重传的 SYN 照样被挡
+    for _ in 0..2 {
+        assert_eq!(
+            t.take_for_syn(50003, block.remote).map(|r| r.action),
+            Some(FlowAction::Block)
+        );
+    }
+    assert_eq!(t.len(), 1);
+    // 只看 TCP
+    let udp = key(Network::Udp, "192.168.1.5:50004", "203.0.113.24:443");
+    t.register(target(udp, GAME, 1));
+    assert_eq!(t.take_for_syn(50004, udp.remote), None);
 }
 
 #[test]
@@ -220,6 +259,31 @@ fn a_full_table_refuses_new_keys_but_keeps_existing_ones() {
     assert!(t.register(target(k3, GAME, 0)));
 }
 
+#[test]
+fn bypass_records_leave_a_quarter_of_the_table_to_target_flows() {
+    let t = FlowTable::new(8);
+    for port in 0..6 {
+        assert!(t.register(record(
+            tcp(40000 + port, "203.0.113.24:443"),
+            OTHER,
+            FlowAction::Bypass
+        )));
+    }
+    assert!(!t.register(record(
+        tcp(40006, "203.0.113.24:443"),
+        OTHER,
+        FlowAction::Bypass
+    )));
+    assert!(t.register(target(tcp(50001, "203.0.113.24:443"), GAME, 0)));
+    assert!(t.register(record(
+        tcp(50002, "203.0.113.24:443"),
+        GAME,
+        FlowAction::Block
+    )));
+    assert_eq!(t.len(), 8);
+    assert_eq!(t.overflows(), 1);
+}
+
 struct Targets(HashMap<ProcessKey, u16>);
 
 impl FlowPolicy for Targets {
@@ -256,6 +320,12 @@ fn connect(pid: u32, key: FlowKey) -> SocketEvent {
     SocketEvent::Connect { pid, key }
 }
 
+fn action_of(a: &Attributor, k: FlowKey) -> Option<FlowAction> {
+    a.table()
+        .get(k.network, k.local.port(), k.remote)
+        .map(|r| r.action)
+}
+
 #[test]
 fn target_connects_are_registered_with_their_group() {
     let a = attributor(InterceptSettings::default());
@@ -269,25 +339,29 @@ fn target_connects_are_registered_with_their_group() {
 }
 
 #[test]
-fn non_target_connects_are_not_registered_and_clear_stale_entries() {
-    // C-NET-02：非目标只读元数据
+fn non_target_connects_are_recorded_as_bypass_and_replace_stale_entries() {
+    // C-NET-02：非目标只记归属元数据，NETWORK 层据此立即放行
     let a = attributor(InterceptSettings::default());
     let k = tcp(50001, "203.0.113.24:443");
     assert_eq!(
         a.handle(connect(OTHER.pid, k)),
         Some(Verdict::Bypass(BypassReason::NotTarget))
     );
-    assert!(a.table().is_empty());
+    assert_eq!(
+        a.table().entries(),
+        vec![record(k, OTHER, FlowAction::Bypass)]
+    );
 
     // 目标进程的登记残留（CLOSE 事件丢失）后，同一端口与远端被非目标进程复用
     a.handle(connect(GAME.pid, k));
-    assert_eq!(a.table().len(), 1);
+    assert_eq!(action_of(&a, k), Some(FlowAction::Redirect { group: 2 }));
     a.handle(connect(OTHER.pid, k));
-    assert!(a.table().is_empty(), "the stale registration must go");
+    assert_eq!(action_of(&a, k), Some(FlowAction::Bypass));
+    assert_eq!(a.table().len(), 1);
 }
 
 #[test]
-fn excluded_remotes_are_never_registered() {
+fn excluded_remotes_are_never_redirected() {
     // C-NET-05：去往代理服务器的流量，即使来自目标进程
     let a = attributor(InterceptSettings::default());
     let k = tcp(50001, "198.51.100.7:8443");
@@ -295,7 +369,7 @@ fn excluded_remotes_are_never_registered() {
         a.handle(connect(GAME.pid, k)),
         Some(Verdict::Bypass(BypassReason::Excluded))
     );
-    assert!(a.table().is_empty());
+    assert_eq!(action_of(&a, k), Some(FlowAction::Bypass));
 }
 
 #[test]
@@ -303,7 +377,10 @@ fn exclusion_updates_apply_to_the_next_connect() {
     let a = attributor(InterceptSettings::default());
     let new_proxy = tcp(50001, "203.0.113.99:443");
     a.handle(connect(GAME.pid, new_proxy));
-    assert_eq!(a.table().len(), 1);
+    assert_eq!(
+        action_of(&a, new_proxy),
+        Some(FlowAction::Redirect { group: 2 })
+    );
 
     a.set_exclusions(ExclusionSet::new([], ["203.0.113.99".parse().unwrap()]));
     let again = tcp(50002, "203.0.113.99:443");
@@ -311,7 +388,7 @@ fn exclusion_updates_apply_to_the_next_connect() {
         a.handle(connect(GAME.pid, again)),
         Some(Verdict::Bypass(BypassReason::Excluded))
     );
-    assert!(a.table().get(Network::Tcp, 50002, again.remote).is_none());
+    assert_eq!(action_of(&a, again), Some(FlowAction::Bypass));
 }
 
 #[test]
@@ -323,8 +400,27 @@ fn unresolvable_processes_count_as_attribution_miss() {
         a.handle(connect(5555, k)),
         Some(Verdict::Bypass(BypassReason::Unattributed))
     );
-    assert!(a.table().is_empty());
+    assert_eq!(
+        a.table().entries(),
+        vec![FlowRecord {
+            key: k,
+            pid: 5555,
+            process: None,
+            action: FlowAction::Bypass,
+        }]
+    );
     assert_eq!(a.counters.snapshot().attribution_miss, 1);
+}
+
+#[test]
+fn attribute_returns_the_verdict_and_the_record() {
+    // NETWORK 层的兜底归属（端口反查到 PID 之后）走同一条路径
+    let a = attributor(InterceptSettings::default());
+    let k = tcp(50001, "203.0.113.24:443");
+    let (verdict, rec) = a.attribute(GAME.pid, k);
+    assert_eq!(verdict, Verdict::Redirect { group: 2 });
+    assert_eq!(rec, target(k, GAME, 2));
+    assert_eq!(a.table().entries(), vec![rec]);
 }
 
 #[test]
@@ -338,11 +434,7 @@ fn blocked_target_flows_are_registered_as_block() {
     assert_eq!(a.handle(connect(GAME.pid, quic)), Some(Verdict::Block));
     assert_eq!(
         a.table().get(Network::Udp, 6000, quic.remote),
-        Some(TargetFlow {
-            key: quic,
-            process: GAME,
-            action: TargetAction::Block,
-        })
+        Some(record(quic, GAME, FlowAction::Block))
     );
 }
 
@@ -371,6 +463,11 @@ fn close_events_forget_the_socket() {
         pid: GAME.pid,
         key: close,
     });
+    assert!(a.table().is_empty());
+
+    // 无法归属的流同样按 CONNECT 里的 PID 撤销
+    a.handle(connect(5555, k));
+    a.handle(SocketEvent::Close { pid: 5555, key: k });
     assert!(a.table().is_empty());
 }
 
