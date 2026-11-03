@@ -189,6 +189,13 @@ pub fn cargo_build(
     kind: &str,
     name: &str,
 ) -> Result<PathBuf> {
+    let json = cargo_json(root, target_dir, args, name)?;
+    artifact_executable(&json, kind, name)
+        .with_context(|| format!("cargo 没有报告 {name} 的可执行文件"))
+}
+
+/// 同 [`cargo_build`]，返回 cargo 的 JSON 消息，供调用方取多个产物（例如测试程序与同一次构建的服务程序）。
+pub fn cargo_json(root: &Path, target_dir: &Path, args: &[&str], what: &str) -> Result<String> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let out = Command::new(cargo)
         .current_dir(root)
@@ -204,14 +211,13 @@ pub fn cargo_build(
         .output()
         .with_context(|| format!("运行 cargo {}", args.join(" ")))?;
     if !out.status.success() {
-        bail!("编译 {name} 失败");
+        bail!("编译 {what} 失败");
     }
-    artifact_executable(&String::from_utf8_lossy(&out.stdout), kind, name)
-        .with_context(|| format!("cargo 没有报告 {name} 的可执行文件"))
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// 从 `cargo --message-format=json` 的输出里找出指定目标的可执行文件。
-fn artifact_executable(cargo_json: &str, kind: &str, name: &str) -> Option<PathBuf> {
+pub fn artifact_executable(cargo_json: &str, kind: &str, name: &str) -> Option<PathBuf> {
     cargo_json
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())

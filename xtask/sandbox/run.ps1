@@ -15,6 +15,10 @@ try {
     $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     $summary.admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $env:PROCROUTE_WINDIVERT_DIR = Join-Path $work 'windivert'
+    # 端到端测试的安装目录（服务、sing-box、WinDivert）与可写的输出目录
+    $install = Join-Path $work 'install'
+    if (Test-Path $install) { $env:PROCROUTE_INSTALL_DIR = $install }
+    $env:PROCROUTE_OUT_DIR = $outDir
     $env:RUST_BACKTRACE = '1'
 
     $manifest = Get-Content (Join-Path $work 'manifest.json') -Raw | ConvertFrom-Json

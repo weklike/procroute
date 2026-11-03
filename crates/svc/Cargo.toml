@@ -12,6 +12,9 @@ publish.workspace = true
 # 开发构建跳过控制管道客户端的路径与签名校验（C-SEC-02）。
 # release 构建（未开启 debug_assertions）同时开启它会直接编译失败，见 src/main.rs。
 insecure-skip-client-auth = []
+# 编译端到端测试（tests/precise_e2e.rs）：启动真实的服务、加载驱动。只在测试虚拟机里开启（C-TEST-04），
+# 通常经 `cargo xtask sandbox-test --only precise_e2e`。
+vm-tests = []
 
 # 服务只在 Windows 上有意义；其他平台只编译一个提示后退出的 main，保证 workspace 在 Linux CI 上可编译。
 [target.'cfg(windows)'.dependencies]

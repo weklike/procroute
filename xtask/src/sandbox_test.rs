@@ -30,43 +30,60 @@ struct Suite {
     features: &'static str,
     /// `tests/<名字>.rs`
     test: &'static str,
+    /// 端到端测试要的「安装目录」：同一次构建产出的这个可执行文件，连同锁定版本的 sing-box 与 WinDivert，
+    /// 放进沙盒里的 `install`（经 `PROCROUTE_INSTALL_DIR` 告诉测试）。
+    install: Option<&'static str>,
 }
 
-const SUITES: [Suite; 6] = [
+const SUITES: [Suite; 7] = [
     Suite {
         package: "procroute-platform-win",
         features: "vm-tests",
         test: "wfp_vm",
+        install: None,
     },
     Suite {
         package: "procroute-platform-win",
         features: "admin-tests",
         test: "etw_admin",
+        install: None,
     },
     Suite {
         package: "procroute-procwatch",
         features: "admin-tests",
         test: "watcher_admin",
+        install: None,
     },
     Suite {
         package: "procroute-intercept",
         features: "vm-tests",
         test: "divert_vm",
+        install: None,
     },
     Suite {
         package: "procroute-intercept",
         features: "vm-tests",
         test: "redirect_vm",
+        install: None,
     },
     Suite {
         package: "procroute-intercept",
         features: "vm-tests",
         test: "precise_vm",
+        install: None,
+    },
+    Suite {
+        package: "procroute-svc",
+        // 开发构建的服务跳过控制管道客户端的签名校验（C-SEC-02 只允许调试构建这样做）
+        features: "vm-tests,insecure-skip-client-auth",
+        test: "precise_e2e",
+        install: Some("procroute-svc"),
     },
 ];
 
 const RUN_PS1: &str = include_str!("../sandbox/run.ps1");
 const WINDIVERT_FILES: [&str; 2] = ["WinDivert.dll", "WinDivert64.sys"];
+const KERNEL_FILE_NAME: &str = "sing-box.exe";
 
 struct Options {
     only: Vec<String>,
@@ -143,7 +160,7 @@ fn run_suites(root: &Path, suites: &[&Suite], opts: &Options) -> Result<()> {
             "编译 {} 的 {}（--features {}）",
             s.package, s.test, s.features
         );
-        let exe = sandbox::cargo_build(
+        let json = sandbox::cargo_json(
             root,
             &base.join("build"),
             &[
@@ -156,11 +173,17 @@ fn run_suites(root: &Path, suites: &[&Suite], opts: &Options) -> Result<()> {
                 "--test",
                 s.test,
             ],
-            "test",
             s.test,
         )?;
+        let exe = sandbox::artifact_executable(&json, "test", s.test)
+            .with_context(|| format!("cargo 没有报告 {} 的可执行文件", s.test))?;
         let file = format!("{}.exe", s.test);
         fs::copy(&exe, input.join(&file)).with_context(|| format!("复制 {}", exe.display()))?;
+        if let Some(bin) = s.install {
+            let bin_exe = sandbox::artifact_executable(&json, "bin", bin)
+                .with_context(|| format!("cargo 没有报告 {bin} 的可执行文件"))?;
+            stage_install(root, &input.join("install"), &bin_exe, bin)?;
+        }
         manifest.push(serde_json::json!({ "name": s.test, "file": file, "args": [] }));
     }
     stage_windivert(root, &input.join("windivert"))?;
@@ -188,6 +211,21 @@ fn run_suites(root: &Path, suites: &[&Suite], opts: &Options) -> Result<()> {
     );
     sandbox::wait_for(&output.join("done"), opts.timeout)?;
     report(&output)
+}
+
+/// 端到端测试的安装目录：服务程序、锁定版本的 sing-box 与 WinDivert 放在一起，和正式安装一样。
+fn stage_install(root: &Path, dest: &Path, bin_exe: &Path, bin: &str) -> Result<()> {
+    stage_windivert(root, dest)?;
+    fs::copy(bin_exe, dest.join(format!("{bin}.exe")))
+        .with_context(|| format!("复制 {}", bin_exe.display()))?;
+    let kernel = root.join("third_party/sing-box/bin").join(KERNEL_FILE_NAME);
+    fs::copy(&kernel, dest.join(KERNEL_FILE_NAME)).with_context(|| {
+        format!(
+            "复制 {}（先运行 `cargo xtask fetch-deps`）",
+            kernel.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn stage_windivert(root: &Path, dest: &Path) -> Result<()> {
