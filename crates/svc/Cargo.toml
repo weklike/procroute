@@ -18,9 +18,11 @@ insecure-skip-client-auth = []
 anyhow = "1.0.104"
 procroute-config = { path = "../config" }
 procroute-core-mgr = { path = "../core-mgr" }
+procroute-intercept = { path = "../intercept" }
 procroute-platform-win = { path = "../platform-win" }
 procroute-procwatch = { path = "../procwatch" }
 procroute-proto = { path = "../proto" }
+procroute-relay = { path = "../relay" }
 procroute-rules = { path = "../rules" }
 serde = "1.0.229"
 serde_json = "1.0.154"
@@ -28,6 +30,10 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# 测试里用拦截层的假后端代替 WinDivert（开发机上不加载驱动，C-TEST-04）
+[target.'cfg(windows)'.dev-dependencies]
+procroute-intercept = { path = "../intercept", features = ["mock"] }
 
 [lints]
 workspace = true

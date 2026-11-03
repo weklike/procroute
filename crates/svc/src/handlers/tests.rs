@@ -18,12 +18,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::sync::watch;
 
+use procroute_intercept::divert::network::{RedirectMap, Relays};
+use procroute_intercept::mock::{MockHandle, MockInterceptor};
+use procroute_intercept::{
+    BypassReason, ExclusionSet, FlowKey, InterceptError, InterceptStats, Interceptor, NewFlow,
+    ProcessKey, StartContext, Verdict,
+};
+
 use super::*;
 use crate::client_auth::ClientAuth;
 use crate::fail_closed::{FailClosedGuard, GuardHandle};
 use crate::ipc_server::{Caller, ServerConfig, serve};
 use crate::kernel::{RunningKernel, StateCallback};
 use crate::node_store::NodeStore;
+use crate::precise::BackendFactory;
 use crate::store::tests::sample;
 
 /// 假内核：记录收到的配置与控制 API 地址，留下状态回调供测试模拟守护的上报。
@@ -123,10 +131,72 @@ impl GuardHandle for FakeGuardHandle {
     }
 }
 
+/// 假的拦截后端工厂：交出拦截层的假后端（开发机上不加载驱动，C-TEST-04），记下中继地址；
+/// `fail` 时交出一个启动即失败的后端。
+#[derive(Default)]
+struct FakeBackends {
+    fail: bool,
+    created: Mutex<Vec<(Relays, Option<MockHandle>)>>,
+}
+
+impl FakeBackends {
+    fn handle(&self, i: usize) -> MockHandle {
+        self.created.lock().expect("created")[i]
+            .1
+            .clone()
+            .expect("a mock backend")
+    }
+}
+
+impl BackendFactory for FakeBackends {
+    fn create(&self, relays: Relays, _map: Arc<dyn RedirectMap>) -> Box<dyn Interceptor> {
+        if self.fail {
+            self.created.lock().expect("created").push((relays, None));
+            return Box::new(BrokenDriver);
+        }
+        let (backend, handle) = MockInterceptor::new();
+        self.created
+            .lock()
+            .expect("created")
+            .push((relays, Some(handle)));
+        Box::new(backend)
+    }
+}
+
+/// 驱动装不上的后端。
+struct BrokenDriver;
+
+impl Interceptor for BrokenDriver {
+    fn name(&self) -> &'static str {
+        "broken"
+    }
+
+    fn start(&mut self, _: StartContext) -> Result<(), InterceptError> {
+        Err(InterceptError::DriverUnavailable("access denied".into()))
+    }
+
+    fn stop(&mut self) -> Result<(), InterceptError> {
+        Err(InterceptError::NotRunning)
+    }
+
+    fn is_active(&self) -> bool {
+        false
+    }
+
+    fn update_exclusions(&mut self, _: ExclusionSet) -> Result<(), InterceptError> {
+        Err(InterceptError::NotRunning)
+    }
+
+    fn stats(&self) -> InterceptStats {
+        InterceptStats::default()
+    }
+}
+
 struct Fixture {
     services: Services,
     launcher: Arc<FakeLauncher>,
     guard: Arc<FakeGuard>,
+    backends: Arc<FakeBackends>,
     dir: PathBuf,
     caller: Caller,
 }
@@ -146,14 +216,29 @@ fn fixture_with(tag: &str, launcher: FakeLauncher) -> Fixture {
 }
 
 fn fixture_with_guard(tag: &str, launcher: FakeLauncher, guard: FakeGuard) -> Fixture {
+    fixture_full(tag, launcher, guard, FakeBackends::default())
+}
+
+fn fixture_with_backends(tag: &str, backends: FakeBackends) -> Fixture {
+    fixture_full(tag, FakeLauncher::default(), FakeGuard::default(), backends)
+}
+
+fn fixture_full(
+    tag: &str,
+    launcher: FakeLauncher,
+    guard: FakeGuard,
+    backends: FakeBackends,
+) -> Fixture {
     let dir = std::env::temp_dir().join(format!("procroute-handlers-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let launcher = Arc::new(launcher);
     let guard = Arc::new(guard);
+    let backends = Arc::new(backends);
     Fixture {
-        services: services_with(&dir, launcher.clone(), guard.clone()),
+        services: services_with(&dir, launcher.clone(), guard.clone(), backends.clone()),
         launcher,
         guard,
+        backends,
         dir,
         caller: Caller {
             // 用测试进程自己：`process.list` 要按调用者的会话过滤
@@ -170,6 +255,7 @@ fn services(dir: &std::path::Path) -> Services {
         dir,
         Arc::new(FakeLauncher::default()),
         Arc::new(FakeGuard::default()),
+        Arc::new(FakeBackends::default()),
     )
 }
 
@@ -177,6 +263,7 @@ fn services_with(
     dir: &std::path::Path,
     launcher: Arc<FakeLauncher>,
     guard: Arc<FakeGuard>,
+    backends: Arc<FakeBackends>,
 ) -> Services {
     Services::new(
         ProfileStore::open(dir).expect("store"),
@@ -184,6 +271,7 @@ fn services_with(
         tokio::sync::broadcast::channel(16).0,
         launcher,
         guard,
+        backends,
         vec![
             r"C:\Program Files\ProcRoute\procroute-svc.exe".into(),
             r"C:\Program Files\ProcRoute\procroute-ui.exe".into(),
@@ -320,7 +408,7 @@ async fn session_reports_truthfully_and_refuses_what_it_cannot_do_safely() {
         ),
         ErrorCode::ProfileNotFound
     );
-    // 精确进程模式：拦截驱动尚未接入
+    // 方案引用了不存在的节点：生成配置就失败，什么都不启动
     let p = sample("p1", "x");
     assert_eq!(p.mode, Mode::Precise);
     f.call("profile.save", to_json(&p).expect("json"))
@@ -328,9 +416,10 @@ async fn session_reports_truthfully_and_refuses_what_it_cannot_do_safely() {
         .expect("save");
     assert_eq!(
         code(f.call("session.start", json!({ "profile_id": "p1" })).await),
-        ErrorCode::DriverNotLoaded
+        ErrorCode::NodeNotFound
     );
     assert_eq!(f.launcher.launch_count(), 0, "nothing was launched");
+    assert!(f.backends.created.lock().expect("created").is_empty());
     let after = f.services.session_snapshot();
     assert_eq!(after.state, SessionState::Stopped);
     assert_eq!(after.components.kernel, ComponentState::Inactive);
@@ -743,3 +832,4 @@ async fn mutating_calls_are_audited_without_their_params() {
 mod diag;
 mod latency;
 mod nodes;
+mod precise;

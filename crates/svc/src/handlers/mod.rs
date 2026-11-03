@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! 各领域的 IPC 处理函数（T-058）。
 //!
-//! 已接上：`session.*`（TUN 模式，见 [`session`] 模块文档）、`profile.*`、
+//! 已接上：`session.*`（TUN 与精确进程模式，见 [`session`] 模块文档）、`profile.*`、
 //! `node.import`（分享链接与订阅）/ `node.list` / `node.test`（见 [`latency`]）、`process.list`、
 //! `diag.export`（见 [`crate::diag`]）。
 //! `conn.subscribe` / `log.subscribe` 由管道服务端处理。
-//! 尚未接上、如实返回错误而不假装成功的：`driver.*`，随 M2 的拦截后端接入。
+//! 尚未接上、如实返回错误而不假装成功的：`driver.*`（拦截驱动随精确模式会话启停，暂无单独的方法）。
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -22,6 +22,7 @@ use crate::fail_closed::FailClosedGuard;
 use crate::ipc_server::{Call, Handler};
 use crate::kernel::KernelLauncher;
 use crate::node_store::NodeStore;
+use crate::precise::BackendFactory;
 use crate::store::{ProfileStore, StoreError};
 
 mod diag;
@@ -41,6 +42,8 @@ pub struct Services {
     launcher: Arc<dyn KernelLauncher>,
     /// TUN 模式 `block` 策略的阻断（C-NET-03）。
     guard: Arc<dyn FailClosedGuard>,
+    /// 精确模式的拦截后端。
+    backend: Arc<dyn BackendFactory>,
     /// 运行中的内核。启动与停止都持有这把锁，彼此互斥。
     kernel: Mutex<Option<session::RunningSession>>,
     /// 当前会话的编号；旧会话的内核回调发现编号变了就不再改写状态。
@@ -59,6 +62,7 @@ impl Services {
         stream: broadcast::Sender<StreamEvent>,
         launcher: Arc<dyn KernelLauncher>,
         guard: Arc<dyn FailClosedGuard>,
+        backend: Arc<dyn BackendFactory>,
         self_exe_paths: Vec<String>,
     ) -> Self {
         Self {
@@ -67,6 +71,7 @@ impl Services {
             hub: Arc::new(EventHub::with_stream(session::initial_status(), stream)),
             launcher,
             guard,
+            backend,
             kernel: Mutex::new(None),
             epoch: Arc::new(AtomicU64::new(0)),
             self_exe_paths,
