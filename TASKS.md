@@ -44,7 +44,7 @@
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
 | M1 | T-050 ~ T-058、T-060 ~ T-062；TUN + `block` 的 WFP 阻断已在沙盒中验证 | 在虚拟机里以服务方式跑一次 TUN 会话（收窄令牌后的 wintun 与 ETW，见下） |
-| M2 | T-070、T-071（驱动测试已在沙盒中通过）、T-073、T-074、T-079 | T-072 / T-075（改道到回环中继的方式用 `cargo xtask sandbox-test` 试） |
+| M2 | T-070、T-071、T-072（驱动测试均已在沙盒中通过）、T-073、T-074、T-079 | T-075（NETWORK 层按 T-072 的登记表把目标流改写到回环中继，用 `cargo xtask sandbox-test` 验证） |
 | M3 | T-090、T-092（中继嗅探 + 远程 DNS，见下）、T-095（配置生成部分）、T-096、T-097 | T-091（需要 Windows）；T-095 的接线随 T-078 |
 | M4 | T-112、T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
 
@@ -115,6 +115,22 @@
   `--features vm-tests` 时编译，必须在虚拟机里以管理员身份运行（C-TEST-04）；开发机上只测 DLL 加载与过滤器语法。
   `WINDIVERT_ADDRESS` 里地址数组的字序（按 WinDivert 的 `ntoh` 助手推断为 `[0]` 最低位）已由
   `socket_layer_reports_this_process_connects` 在 Windows Sandbox 中确认（2026-10-29）。
+- T-072：`intercept::divert::socket`。SOCKET 层以 `SNIFF | RECV_ONLY` 打开，只收 TCP / UDP 的 CONNECT 与 CLOSE，
+  回环连接在过滤器里就滤掉（C-NET-05），队列长度取上限 16384。CONNECT 事件只带 PID，创建时间由 `ProcessResolver`
+  补上（默认 `SystemProcesses`：`OpenProcess` + `GetProcessTimes`，与 procwatch 同源，C-DRV-04），再按 `decide` 判定：
+  - 改道 / 阻断的目标流登记进 `FlowTable`，供 T-075 的 NETWORK 层按出站包查询。键是协议 + 本地端口 + 远端，不含本地
+    地址（事件与包里的本地地址写法可能不同）；64 个分片各自加锁，逐包查询只锁一个分片、不分配内存（C-CODE-04）；
+    上限 65536，满了拒绝新登记并计数，不淘汰已有登记。
+  - 非目标流不进表、不改写（C-NET-02）；同一键上残留的旧登记随之清掉，端口被非目标进程复用时不会被误改道。
+  - CLOSE 按 PID 撤销该套接字的登记；未连接的 UDP 套接字关闭时没有远端，撤销整个端口。
+  - 每条流在这里判定一次，计数器（含 `attribution_miss`）也在这里记一次。收事件的线程出错退出时
+    `SocketMonitor::failure()` 给出错误，之后不再有新的归属，上层必须按 fail_policy 处理（随 T-078）。
+  - **T-078 必须处理**：svc 实现 `FlowPolicy` 时，进程追踪（ETW 约 100 ms）还没登记的新进程，第一次 connect 会被判成
+    非目标。对未知进程要当场按规则判定（映像路径 + 规则引擎，含继承），否则新启动的目标进程头几个连接会直连。
+  - 产出与原计划不同：单元测试在 `divert/socket/tests.rs`（不加载驱动），收事件线程的测试加在 `tests/divert_vm.rs`。
+  - 2026-11-03 在 Windows Sandbox 中通过（`cargo xtask sandbox-test --only divert_vm`，4 个测试）：本进程的 TCP connect
+    被登记（进程身份、进程组、非零本地端口），子进程的 connect 被判定但不登记，套接字关闭后登记被撤销。第一次运行时
+    发往 TEST-NET-1 的 connect 被立即接受（宿主网络上有透明代理），测试已改成连上与连不上两种情况都成立。
 - 桌面客户端（`app/src-tauri`，包名 `procroute-ui`）：只依赖 proto；一条长连接、断线每 2 秒重连并重放订阅。
   外壳自己的事件 `shell:connection`（与服务的连接变化，界面据此清空服务端数据，C-UI-02）与 `shell:tray`（托盘点击）
   不属于 IPC 协议，类型写在 `app/src/api/shell.ts`。托盘菜单由前端生成并下发（文案走 i18n，C-UI-04），外壳只处理
@@ -144,7 +160,8 @@
   `target/sandbox/build`），连同锁定的 WinDivert 文件只读映射进沙盒，由 `xtask/sandbox/run.ps1` 复制到沙盒本地
   磁盘后逐个运行，结果写回 `target/sandbox/out` 后沙盒自动关机。沙盒启用默认 NAT 网络（WFP 测试要区分「被过滤器
   拒绝」与「没有路由」）。登录命令不是管理员时整次运行判为失败。2026-10-29 首次运行 4 个文件 6 个测试全部通过。
-  以服务方式运行的联调（`cargo xtask dev`、收窄令牌后的 TUN）还没有放进沙盒。
+  以服务方式运行的联调（`cargo xtask dev`、收窄令牌后的 TUN）还没有放进沙盒。客户机关机后，沙盒的客户端窗口偶尔
+  不退出，下一次运行会提示「已有一个 Windows Sandbox 在运行」，关掉该窗口即可（2026-11-03 遇到一次）。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
 - sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的
   `curl.exe` / `tar.exe` 拉取，SHA256 用 Windows CNG（`platform-win::hash`，T-056 校验 sing-box 时复用），
