@@ -2,7 +2,8 @@
 //! WinDivert 后端：组装 SOCKET 层归属（[`SocketMonitor`]）与 NETWORK 层改道（[`NetworkWorker`]），
 //! 以 [`Interceptor`] 交给 svc（C-DRV-06）。
 //!
-//! 目前只改道 TCP。UDP 与 53 端口的劫持随 T-091 接入；在那之前目标进程的 UDP 不经过本后端。
+//! 目前只改道 TCP。UDP 与 53 端口的劫持随 T-091 接入；在那之前目标进程的 UDP 按 fail_policy 丢弃或放行
+//! （见 [`super::network`]）。
 //!
 //! 启动顺序：先起 NETWORK 层，再起 SOCKET 层。两者之间发起的连接没有 SOCKET 事件，它们的第一个 SYN
 //! 经暂存与连接表反查兜底归属（C-NET-04），不会漏掉。停止时先关 SOCKET 层，再关 NETWORK 层；

@@ -16,6 +16,11 @@
 //! NAT 表项。
 //!
 //! 处理不了的目标包（登记 NAT 失败、映射端口被占、没有对应地址族的中继）按 fail_policy（C-NET-07）。
+//!
+//! UDP：中继接入（T-091）之前，目标进程的 UDP（含直发的 53 端口查询）还不能改道，属于「处理不了」，
+//! 按 fail_policy 丢弃或放行（C-NET-07）；所以出站 UDP 也抓，按 SOCKET 层的登记（不消耗）判断是否目标。
+//! 非目标的 UDP 原样放回。逐个数据报都可能命中，不为它们发事件，只计数。
+//!
 //! 逐包路径只锁一个分片、不分配内存、不写日志（C-CODE-04）。
 
 use std::collections::HashMap;
@@ -63,7 +68,7 @@ impl Relays {
         port == self.v4.port() || self.v6.is_some_and(|v6| v6.port() == port)
     }
 
-    /// NETWORK 层过滤器：出站的非回环 TCP，加上中继发回的回环包（回环包只出现在出站方向）。
+    /// NETWORK 层过滤器：出站的非回环 TCP 与 UDP，加上中继发回的回环 TCP 包（回环包只出现在出站方向）。
     /// 其他驱动注入的包（impostor）不抓，免得与别的改道工具互相转圈。
     pub fn filter(&self) -> String {
         let relay_ports = match self.v6 {
@@ -77,7 +82,8 @@ impl Relays {
             _ => format!("tcp.SrcPort == {}", self.v4.port()),
         };
         format!(
-            "tcp and !impostor and ((outbound and !loopback) or (loopback and ({relay_ports})))"
+            "!impostor and ((outbound and !loopback and (tcp or udp)) \
+             or (loopback and tcp and ({relay_ports})))"
         )
     }
 }
@@ -221,18 +227,29 @@ impl Engine {
     /// 处理一个收到的包。返回 [`Outcome::Inject`] 时包与地址信息都已就地改写。
     pub fn process(&self, pkt: &mut [u8], addr: &mut Address, now: Instant) -> Outcome {
         let Ok(mut p) = packet::parse(pkt) else {
-            // 读不出 TCP 端口就无从归属：既不是能改写的目标包，也不能确定是谁的，原样放回
+            // 读不出端口就无从归属：既不是能改写的目标包，也不能确定是谁的，原样放回
             return Outcome::Pass;
         };
-        if p.network() != Network::Tcp {
-            return Outcome::Pass;
+        match (p.network(), addr.loopback(), addr.outbound()) {
+            (Network::Tcp, true, _) => self.on_relay_packet(&mut p, addr, now),
+            (Network::Tcp, false, true) => self.on_app_packet(&mut p, addr, now),
+            (Network::Udp, false, true) => self.on_app_datagram(&p),
+            _ => Outcome::Pass,
         }
-        if addr.loopback() {
-            self.on_relay_packet(&mut p, addr, now)
-        } else if addr.outbound() {
-            self.on_app_packet(&mut p, addr, now)
-        } else {
-            Outcome::Pass
+    }
+
+    /// 应用发出的 UDP：目标进程的按 fail_policy 处理（中继接入之前处理不了，C-NET-07），其余放回。
+    fn on_app_datagram(&self, p: &Packet<'_>) -> Outcome {
+        let (src, dst) = (p.src(), p.dst());
+        match self.flows.get(Network::Udp, src.port(), dst) {
+            Some(FlowRecord {
+                action: FlowAction::Redirect { .. } | FlowAction::Block,
+                ..
+            }) => match unprocessable(self.fail_policy, &self.counters) {
+                Verdict::Block => Outcome::Drop,
+                _ => Outcome::Pass,
+            },
+            _ => Outcome::Pass,
         }
     }
 

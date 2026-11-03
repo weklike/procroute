@@ -461,3 +461,84 @@ fn the_filter_compiles_at_the_network_layer() {
             .unwrap_or_else(|e| panic!("{filter}: {e}"));
     }
 }
+
+/// 拼一个 IPv4 UDP 包，4 字节负载。
+fn udp4(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
+    let (IpAddr::V4(s), IpAddr::V4(d)) = (src.ip(), dst.ip()) else {
+        panic!("IPv4 only");
+    };
+    let mut p = vec![0u8; 20 + 8 + 4];
+    p[0] = 0x45;
+    p[2..4].copy_from_slice(&32u16.to_be_bytes());
+    p[8] = 128;
+    p[9] = 17;
+    p[12..16].copy_from_slice(&s.octets());
+    p[16..20].copy_from_slice(&d.octets());
+    p[20..22].copy_from_slice(&src.port().to_be_bytes());
+    p[22..24].copy_from_slice(&dst.port().to_be_bytes());
+    p[24..26].copy_from_slice(&12u16.to_be_bytes());
+    p
+}
+
+impl Rig {
+    fn register_udp(&self, local: &str, remote: &str, process: ProcessKey, action: FlowAction) {
+        self.engine.flows.register(FlowRecord {
+            key: FlowKey {
+                network: Network::Udp,
+                local: sock(local),
+                remote: sock(remote),
+            },
+            pid: process.pid,
+            process: Some(process),
+            action,
+        });
+    }
+}
+
+#[test]
+fn target_udp_follows_fail_policy_until_the_udp_relay_lands() {
+    // C-NET-07：中继接入之前，目标进程的 UDP 处理不了
+    let game = "192.168.1.5:6000";
+    let server = "203.0.113.24:27015";
+    let dns = "8.8.8.8:53";
+    let r = rig();
+    let t0 = Instant::now();
+    r.register_udp(game, server, GAME, FlowAction::Redirect { group: 0 });
+    r.register_udp(game, dns, GAME, FlowAction::Redirect { group: 0 });
+    for remote in [server, dns, server] {
+        let (out, _, _) = r.send(udp4(sock(game), sock(remote)), app_addr(), t0);
+        assert_eq!(out, Outcome::Drop, "{remote}");
+    }
+    // 登记不因数据报而消耗，也不发事件
+    assert_eq!(r.engine.flows.len(), 2);
+    assert!(r.events().is_empty());
+    assert_eq!(r.engine.counters.snapshot().blocked, 3);
+
+    let allow = rig_with(FailPolicy::Allow, true);
+    allow.register_udp(game, server, GAME, FlowAction::Redirect { group: 0 });
+    let (out, _, _) = allow.send(udp4(sock(game), sock(server)), app_addr(), t0);
+    assert_eq!(out, Outcome::Pass);
+}
+
+#[test]
+fn non_target_and_unknown_udp_pass_untouched() {
+    let r = rig();
+    let t0 = Instant::now();
+    r.register_udp(
+        "192.168.1.5:6001",
+        "203.0.113.24:443",
+        OTHER,
+        FlowAction::Bypass,
+    );
+    for (src, dst) in [
+        ("192.168.1.5:6001", "203.0.113.24:443"),
+        ("192.168.1.5:6002", "203.0.113.24:443"),
+    ] {
+        let pkt = udp4(sock(src), sock(dst));
+        let (out, after, _) = r.send(pkt.clone(), app_addr(), t0);
+        assert_eq!((out, after), (Outcome::Pass, pkt), "{src} -> {dst}");
+    }
+    // 入站 UDP 不在过滤器里，防御性地放回
+    let inbound = udp4(sock("203.0.113.24:443"), sock("192.168.1.5:6001"));
+    assert_eq!(r.send(inbound, inbound_addr(), t0).0, Outcome::Pass);
+}
