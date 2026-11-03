@@ -17,9 +17,11 @@
 //!
 //! 处理不了的目标包（登记 NAT 失败、映射端口被占、没有对应地址族的中继）按 fail_policy（C-NET-07）。
 //!
-//! UDP：中继接入（T-091）之前，目标进程的 UDP（含直发的 53 端口查询）还不能改道，属于「处理不了」，
-//! 按 fail_policy 丢弃或放行（C-NET-07）；所以出站 UDP 也抓，按 SOCKET 层的登记（不消耗）判断是否目标。
-//! 非目标的 UDP 原样放回。逐个数据报都可能命中，不为它们发事件，只计数。
+//! UDP（T-091，见 [`super::udp`]）：出站 UDP 也抓。先看 SOCKET 层对（本地端口, 远端）的登记（不消耗）：
+//! 改道的交给 UDP 中继、原包丢弃，阻断的丢弃，放行的放回；没有登记时看这个本地端口是不是已登记的目标
+//! 套接字（同一套接字发往新的远端，事件还没到）。目标数据报再按方案过一遍：开了 QUIC 阻断时 443 丢弃，
+//! 关了 UDP 代理时只劫持 53 端口、其余直连（用户的选择）。没有 UDP 中继时目标数据报属于「处理不了」，
+//! 按 fail_policy 处理（C-NET-07）。逐个数据报不发事件。
 //!
 //! 逐包路径只锁一个分片、不分配内存、不写日志（C-CODE-04）。
 
@@ -30,11 +32,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use procroute_proto::event::Network;
-use procroute_proto::profile::FailPolicy;
 
 use super::ffi::{Address, NetworkData};
 use super::socket::{FlowAction, FlowRecord, FlowTable};
-use crate::backend::{Counters, Verdict, emit, unprocessable};
+use super::udp::{UdpForward, UdpSockets};
+use crate::backend::{Counters, InterceptSettings, Verdict, emit, unprocessable};
 use crate::flow::{FlowEvent, FlowKey, ProcessKey};
 use crate::packet::{self, Packet, tcp_flags};
 
@@ -44,6 +46,9 @@ pub const FIN_LINGER: Duration = Duration::from_secs(30);
 pub const RST_LINGER: Duration = Duration::from_secs(5);
 /// 没有收尾的连接空闲这么久后回收（与 Windows 的 TCP keepalive 默认间隔一致）。
 pub const IDLE_LIMIT: Duration = Duration::from_secs(2 * 60 * 60);
+
+const PORT_DNS: u16 = 53;
+const PORT_QUIC: u16 = 443;
 
 const SHARDS: usize = 64;
 /// 连接跟踪表每个分片预留的容量：映射端口最多 65536 个。
@@ -173,7 +178,10 @@ pub struct Engine {
     conns: Box<[Mutex<Shard>]>,
     relays: Relays,
     map: Arc<dyn RedirectMap>,
-    fail_policy: FailPolicy,
+    /// UDP 中继；没有时目标进程的 UDP 按 fail_policy 处理。
+    udp: Option<Arc<dyn UdpForward>>,
+    sockets: UdpSockets,
+    settings: InterceptSettings,
     counters: Arc<Counters>,
     events: SyncSender<FlowEvent>,
 }
@@ -182,7 +190,8 @@ impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
             .field("relays", &self.relays)
-            .field("fail_policy", &self.fail_policy)
+            .field("udp", &self.udp.is_some())
+            .field("settings", &self.settings)
             .finish_non_exhaustive()
     }
 }
@@ -192,7 +201,8 @@ impl Engine {
         flows: Arc<FlowTable>,
         relays: Relays,
         map: Arc<dyn RedirectMap>,
-        fail_policy: FailPolicy,
+        udp: Option<Arc<dyn UdpForward>>,
+        settings: InterceptSettings,
         counters: Arc<Counters>,
         events: SyncSender<FlowEvent>,
     ) -> Self {
@@ -203,10 +213,17 @@ impl Engine {
                 .collect(),
             relays,
             map,
-            fail_policy,
+            udp,
+            sockets: UdpSockets::default(),
+            settings,
             counters,
             events,
         }
+    }
+
+    /// 目标 UDP 套接字表（回包注入要用）。
+    pub fn udp_sockets(&self) -> &UdpSockets {
+        &self.sockets
     }
 
     pub fn relays(&self) -> &Relays {
@@ -233,23 +250,54 @@ impl Engine {
         match (p.network(), addr.loopback(), addr.outbound()) {
             (Network::Tcp, true, _) => self.on_relay_packet(&mut p, addr, now),
             (Network::Tcp, false, true) => self.on_app_packet(&mut p, addr, now),
-            (Network::Udp, false, true) => self.on_app_datagram(&p),
+            (Network::Udp, false, true) => self.on_app_datagram(&p, addr, now),
             _ => Outcome::Pass,
         }
     }
 
-    /// 应用发出的 UDP：目标进程的按 fail_policy 处理（中继接入之前处理不了，C-NET-07），其余放回。
-    fn on_app_datagram(&self, p: &Packet<'_>) -> Outcome {
+    /// 应用发出的 UDP，见模块文档。
+    fn on_app_datagram(&self, p: &Packet<'_>, addr: &Address, now: Instant) -> Outcome {
         let (src, dst) = (p.src(), p.dst());
-        match self.flows.get(Network::Udp, src.port(), dst) {
+        let group = match self.flows.get(Network::Udp, src.port(), dst) {
             Some(FlowRecord {
-                action: FlowAction::Redirect { .. } | FlowAction::Block,
+                action: FlowAction::Redirect { group },
+                process: Some(process),
                 ..
-            }) => match unprocessable(self.fail_policy, &self.counters) {
+            }) => {
+                if self.sockets.touch(src, now) != Some(group) {
+                    self.sockets
+                        .insert(src, process, group, addr.network(), now);
+                }
+                group
+            }
+            Some(FlowRecord {
+                action: FlowAction::Block,
+                ..
+            }) => return Outcome::Drop,
+            Some(_) => return Outcome::Pass,
+            None => match self.sockets.touch(src, now) {
+                Some(group) => group,
+                None => return Outcome::Pass,
+            },
+        };
+        let port = dst.port();
+        if self.settings.block_quic && port == PORT_QUIC {
+            return Outcome::Drop;
+        }
+        if !(self.settings.udp_enabled || (self.settings.hijack_port53 && port == PORT_DNS)) {
+            // 用户关了 UDP 代理：目标进程的 UDP 照常直连
+            return Outcome::Pass;
+        }
+        match &self.udp {
+            Some(udp) => {
+                // 交给中继后原包丢弃；中继拒收的同样丢弃（C-NET-03）
+                udp.forward(src, group, dst, p.udp_payload());
+                Outcome::Drop
+            }
+            None => match unprocessable(self.settings.fail_policy, &self.counters) {
                 Verdict::Block => Outcome::Drop,
                 _ => Outcome::Pass,
             },
-            _ => Outcome::Pass,
         }
     }
 
@@ -379,7 +427,7 @@ impl Engine {
 
     /// 目标流处理不了：按 fail_policy 阻断或放行（C-NET-07）。
     fn fail(&self, key: FlowKey, process: Option<ProcessKey>) -> Outcome {
-        match unprocessable(self.fail_policy, &self.counters) {
+        match unprocessable(self.settings.fail_policy, &self.counters) {
             Verdict::Block => {
                 emit(
                     &self.events,
@@ -425,6 +473,7 @@ impl Engine {
         for conn in &expired {
             self.closed(conn);
         }
+        self.sockets.sweep(now);
         expired.len()
     }
 
@@ -438,6 +487,7 @@ impl Engine {
         for conn in &all {
             self.closed(conn);
         }
+        self.sockets.clear();
     }
 
     /// 正在跟踪的改道连接数。

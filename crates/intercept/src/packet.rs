@@ -181,6 +181,67 @@ impl Packet<'_> {
             Network::Udp => 0,
         }
     }
+
+    /// UDP 负载（按 UDP 头里的长度，超出缓冲区时截到缓冲区末尾）；TCP 包返回空切片。
+    pub fn udp_payload(&self) -> &[u8] {
+        if self.network != Network::Udp {
+            return &[];
+        }
+        let start = self.l4 + UDP_HEADER;
+        let declared = usize::from(u16::from_be_bytes([
+            self.buf[self.l4 + 4],
+            self.buf[self.l4 + 5],
+        ]));
+        let end = (self.l4 + declared.max(UDP_HEADER)).min(self.buf.len());
+        &self.buf[start.min(end)..end]
+    }
+}
+
+/// 在 `buf` 里拼一个 UDP 数据报（IPv4 或 IPv6，取决于地址），返回总长度。校验和留空，由
+/// `WinDivert::calc_checksums` 计算。地址族不一致、缓冲区放不下或负载超过 UDP 上限时返回 `None`。
+pub fn build_udp(
+    buf: &mut [u8],
+    src: SocketAddr,
+    dst: SocketAddr,
+    payload: &[u8],
+) -> Option<usize> {
+    let udp_len = UDP_HEADER + payload.len();
+    let udp_len16 = u16::try_from(udp_len).ok()?;
+    let (l4, total) = match (src.ip(), dst.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let total = IPV4_MIN_HEADER + udp_len;
+            let total16 = u16::try_from(total).ok()?;
+            let h = buf.get_mut(..IPV4_MIN_HEADER)?;
+            h.fill(0);
+            h[0] = 0x45;
+            h[2..4].copy_from_slice(&total16.to_be_bytes());
+            h[6] = 0x40; // DF
+            h[8] = 64;
+            h[9] = PROTO_UDP;
+            h[12..16].copy_from_slice(&s.octets());
+            h[16..20].copy_from_slice(&d.octets());
+            (IPV4_MIN_HEADER, total)
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            let h = buf.get_mut(..IPV6_HEADER)?;
+            h.fill(0);
+            h[0] = 0x60;
+            h[4..6].copy_from_slice(&udp_len16.to_be_bytes());
+            h[6] = PROTO_UDP;
+            h[7] = 64;
+            h[8..24].copy_from_slice(&s.octets());
+            h[24..40].copy_from_slice(&d.octets());
+            (IPV6_HEADER, IPV6_HEADER + udp_len)
+        }
+        _ => return None,
+    };
+    let u = buf.get_mut(l4..total)?;
+    u[0..2].copy_from_slice(&src.port().to_be_bytes());
+    u[2..4].copy_from_slice(&dst.port().to_be_bytes());
+    u[4..6].copy_from_slice(&udp_len16.to_be_bytes());
+    u[6..8].fill(0);
+    u[UDP_HEADER..].copy_from_slice(payload);
+    Some(total)
 }
 
 #[cfg(test)]
@@ -342,5 +403,70 @@ mod tests {
         let p = parse(&mut buf).expect("parse");
         assert_eq!(p.src().port(), 1111);
         assert_eq!(p.dst().port(), 2222);
+    }
+
+    #[test]
+    fn udp_payload_follows_the_udp_length() {
+        let mut buf = ipv4(PROTO_UDP, [10, 0, 0, 2], [10, 0, 0, 3], (6000, 53), 0);
+        // ipv4() 留了 4 字节负载，UDP 头里的长度写 8 + 4
+        buf[24..26].copy_from_slice(&12u16.to_be_bytes());
+        buf[28..32].copy_from_slice(b"ping");
+        let p = parse(&mut buf).expect("parse");
+        assert_eq!(p.udp_payload(), b"ping");
+        // 长度超出缓冲区时截断，过小时为空
+        let mut long = buf.clone();
+        long[24..26].copy_from_slice(&1000u16.to_be_bytes());
+        assert_eq!(parse(&mut long).expect("parse").udp_payload(), b"ping");
+        let mut short = buf.clone();
+        short[24..26].copy_from_slice(&3u16.to_be_bytes());
+        assert!(parse(&mut short).expect("parse").udp_payload().is_empty());
+        let mut tcp = ipv4(PROTO_TCP, [10, 0, 0, 2], [10, 0, 0, 3], (1, 2), 0);
+        assert!(parse(&mut tcp).expect("parse").udp_payload().is_empty());
+    }
+
+    #[test]
+    fn builds_udp_datagrams_that_parse_back() {
+        let mut buf = [0u8; 128];
+        let n = build_udp(
+            &mut buf,
+            sock("203.0.113.24:27015"),
+            sock("192.168.1.5:6000"),
+            b"pong",
+        )
+        .expect("ipv4");
+        assert_eq!(n, 20 + 8 + 4);
+        let p = parse(&mut buf[..n]).expect("parse");
+        assert_eq!(p.network(), Network::Udp);
+        assert_eq!(p.src(), sock("203.0.113.24:27015"));
+        assert_eq!(p.dst(), sock("192.168.1.5:6000"));
+        assert_eq!(p.udp_payload(), b"pong");
+
+        let n = build_udp(
+            &mut buf,
+            sock("[2001:db8::1]:53"),
+            sock("[2001:db8::5]:6000"),
+            b"dns",
+        )
+        .expect("ipv6");
+        assert_eq!(n, 40 + 8 + 3);
+        let p = parse(&mut buf[..n]).expect("parse");
+        assert!(p.is_ipv6());
+        assert_eq!(p.src(), sock("[2001:db8::1]:53"));
+        assert_eq!(p.udp_payload(), b"dns");
+
+        // 地址族不一致、放不下
+        assert_eq!(
+            build_udp(&mut buf, sock("[::1]:1"), sock("127.0.0.1:2"), b""),
+            None
+        );
+        assert_eq!(
+            build_udp(
+                &mut buf[..30],
+                sock("127.0.0.1:1"),
+                sock("127.0.0.1:2"),
+                b"abc"
+            ),
+            None
+        );
     }
 }

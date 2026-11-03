@@ -2,8 +2,8 @@
 //! WinDivert 后端：组装 SOCKET 层归属（[`SocketMonitor`]）与 NETWORK 层改道（[`NetworkWorker`]），
 //! 以 [`Interceptor`] 交给 svc（C-DRV-06）。
 //!
-//! 目前只改道 TCP。UDP 与 53 端口的劫持随 T-091 接入；在那之前目标进程的 UDP 按 fail_policy 丢弃或放行
-//! （见 [`super::network`]）。
+//! TCP 改道到回环中继；UDP（含 53 端口的劫持）交给 [`DivertConfig::udp`] 的 UDP 中继，回包经
+//! [`UdpReplier`] 注入（T-091）。没有配置 UDP 中继时目标进程的 UDP 按 fail_policy 处理。
 //!
 //! 启动顺序：先起 NETWORK 层，再起 SOCKET 层。两者之间发起的连接没有 SOCKET 事件，它们的第一个 SYN
 //! 经暂存与连接表反查兜底归属（C-NET-04），不会漏掉。停止时先关 SOCKET 层，再关 NETWORK 层；
@@ -15,6 +15,7 @@ use std::sync::Arc;
 use super::ffi::WinDivert;
 use super::network::{Engine, RedirectMap, Relays};
 use super::socket::{Attributor, FlowTable, ProcessResolver, SocketMonitor};
+use super::udp::{UdpForward, UdpReplier};
 use super::worker::NetworkWorker;
 use crate::backend::{Counters, InterceptError, InterceptStats, Interceptor, StartContext};
 use crate::exclude::ExclusionSet;
@@ -27,6 +28,8 @@ pub struct DivertConfig {
     pub relays: Relays,
     /// 把改道登记进中继的 NAT 表。
     pub map: Arc<dyn RedirectMap>,
+    /// UDP 中继。
+    pub udp: Option<Arc<dyn UdpForward>>,
     pub resolver: Arc<dyn ProcessResolver>,
     /// 收包线程数。
     pub receivers: usize,
@@ -51,9 +54,13 @@ struct Running {
 }
 
 impl Running {
-    fn shut_down(mut self) {
+    fn shut_down(mut self, udp: Option<&Arc<dyn UdpForward>>) {
         if let Some(s) = self.socket.take() {
             s.stop();
+        }
+        // 先断开回包出口，再关句柄
+        if let Some(udp) = udp {
+            udp.attach(None);
         }
         if let Some(n) = self.network.take() {
             n.stop();
@@ -130,7 +137,8 @@ impl Interceptor for DivertInterceptor {
             Arc::clone(&table),
             self.config.relays,
             Arc::clone(&self.config.map),
-            ctx.settings.fail_policy,
+            self.config.udp.clone(),
+            ctx.settings,
             Arc::clone(&self.counters),
             ctx.events,
         ));
@@ -144,6 +152,12 @@ impl Interceptor for DivertInterceptor {
         let started =
             NetworkWorker::start(&api, engine, Arc::clone(&attributor), self.config.receivers)
                 .and_then(|network| {
+                    if let Some(udp) = &self.config.udp {
+                        udp.attach(Some(Arc::new(UdpReplier::new(
+                            Arc::clone(&running.engine),
+                            network.injector(),
+                        ))));
+                    }
                     running.network = Some(network);
                     SocketMonitor::start(&api, attributor)
                 });
@@ -154,7 +168,7 @@ impl Interceptor for DivertInterceptor {
                 Ok(())
             }
             Err(e) => {
-                running.shut_down();
+                running.shut_down(self.config.udp.as_ref());
                 Err(InterceptError::DriverUnavailable(e.to_string()))
             }
         }
@@ -162,7 +176,7 @@ impl Interceptor for DivertInterceptor {
 
     fn stop(&mut self) -> Result<(), InterceptError> {
         let running = self.running.take().ok_or(InterceptError::NotRunning)?;
-        running.shut_down();
+        running.shut_down(self.config.udp.as_ref());
         Ok(())
     }
 
@@ -185,7 +199,7 @@ impl Drop for DivertInterceptor {
     fn drop(&mut self) {
         // 与 Interceptor 的约定一致：销毁即撤销全部过滤器（C-NET-06）
         if let Some(r) = self.running.take() {
-            r.shut_down();
+            r.shut_down(self.config.udp.as_ref());
         }
     }
 }

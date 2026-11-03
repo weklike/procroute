@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, sync_channel};
 
+use procroute_proto::profile::FailPolicy;
+
 use super::*;
 use crate::divert::ffi::{Layer, WinDivert};
 
@@ -112,6 +114,17 @@ const RELAY4: &str = "127.0.0.1:7000";
 const RELAY6: &str = "[::1]:7001";
 
 fn rig_with(fail_policy: FailPolicy, v6: bool) -> Rig {
+    rig_full(
+        InterceptSettings {
+            fail_policy,
+            ..InterceptSettings::default()
+        },
+        v6,
+        None,
+    )
+}
+
+fn rig_full(settings: InterceptSettings, v6: bool, udp: Option<Arc<dyn UdpForward>>) -> Rig {
     let map = Arc::new(FakeMap::default());
     let (tx, events) = sync_channel(64);
     let engine = Engine::new(
@@ -121,7 +134,8 @@ fn rig_with(fail_policy: FailPolicy, v6: bool) -> Rig {
             v6: v6.then(|| sock(RELAY6)),
         },
         map.clone(),
-        fail_policy,
+        udp,
+        settings,
         Arc::new(Counters::default()),
         tx,
     );
@@ -541,4 +555,161 @@ fn non_target_and_unknown_udp_pass_untouched() {
     // 入站 UDP 不在过滤器里，防御性地放回
     let inbound = udp4(sock("203.0.113.24:443"), sock("192.168.1.5:6001"));
     assert_eq!(r.send(inbound, inbound_addr(), t0).0, Outcome::Pass);
+}
+
+/// 交给中继的一个数据报：会话、进程组、目的地址、负载。
+type Forwarded = (SocketAddr, u16, SocketAddr, Vec<u8>);
+
+/// 假的 UDP 中继：记下交来的数据报；`refuse` 时拒收。
+#[derive(Default)]
+struct FakeUdp {
+    refuse: bool,
+    forwarded: Mutex<Vec<Forwarded>>,
+}
+
+impl UdpForward for FakeUdp {
+    fn forward(&self, session: SocketAddr, group: u16, dst: SocketAddr, payload: &[u8]) -> bool {
+        if self.refuse {
+            return false;
+        }
+        self.forwarded
+            .lock()
+            .unwrap()
+            .push((session, group, dst, payload.to_vec()));
+        true
+    }
+
+    fn attach(&self, _: Option<Arc<dyn crate::divert::udp::UdpReplies>>) {}
+}
+
+fn udp_rig(settings: InterceptSettings) -> (Rig, Arc<FakeUdp>) {
+    let udp = Arc::new(FakeUdp::default());
+    (rig_full(settings, true, Some(udp.clone())), udp)
+}
+
+/// 带 4 字节负载 `ping` 的 UDP 包。
+fn ping(src: &str, dst: &str) -> Vec<u8> {
+    let mut p = udp4(sock(src), sock(dst));
+    p[28..32].copy_from_slice(b"ping");
+    p
+}
+
+const GAME_UDP: &str = "192.168.1.5:6000";
+const SERVER: &str = "203.0.113.24:27015";
+
+#[test]
+fn target_udp_goes_to_the_udp_relay_and_the_original_is_dropped() {
+    let (r, udp) = udp_rig(InterceptSettings::default());
+    let t0 = Instant::now();
+    r.register_udp(GAME_UDP, SERVER, GAME, FlowAction::Redirect { group: 2 });
+    let (out, _, _) = r.send(ping(GAME_UDP, SERVER), app_addr(), t0);
+    assert_eq!(out, Outcome::Drop);
+    assert_eq!(
+        *udp.forwarded.lock().unwrap(),
+        vec![(sock(GAME_UDP), 2, sock(SERVER), b"ping".to_vec())]
+    );
+    // 套接字登记下来，回包知道往哪个接口注入
+    assert_eq!(
+        r.engine.udp_sockets().reply_target(6000),
+        Some((sock(GAME_UDP), IFACE))
+    );
+    assert_eq!(r.engine.udp_sockets().owner(6000), Some((GAME, 2)));
+
+    // 同一套接字发往新的远端：SOCKET 层的登记还没到，按套接字认出来
+    let other = "203.0.113.25:27015";
+    assert_eq!(
+        r.send(ping(GAME_UDP, other), app_addr(), t0).0,
+        Outcome::Drop
+    );
+    assert_eq!(udp.forwarded.lock().unwrap().len(), 2);
+    assert!(r.events().is_empty(), "no event per datagram");
+}
+
+#[test]
+fn records_beat_the_socket_table() {
+    // 目标套接字发往被排除的远端（例如代理服务器）：放行，不进中继（C-NET-05）
+    let (r, udp) = udp_rig(InterceptSettings::default());
+    let t0 = Instant::now();
+    r.register_udp(GAME_UDP, SERVER, GAME, FlowAction::Redirect { group: 0 });
+    r.send(ping(GAME_UDP, SERVER), app_addr(), t0);
+    let proxy = "198.51.100.7:8443";
+    r.register_udp(GAME_UDP, proxy, GAME, FlowAction::Bypass);
+    let pkt = ping(GAME_UDP, proxy);
+    let (out, after, _) = r.send(pkt.clone(), app_addr(), t0);
+    assert_eq!((out, after), (Outcome::Pass, pkt));
+    // 阻断的登记（QUIC）丢弃
+    let quic = "203.0.113.24:443";
+    r.register_udp(GAME_UDP, quic, GAME, FlowAction::Block);
+    assert_eq!(
+        r.send(ping(GAME_UDP, quic), app_addr(), t0).0,
+        Outcome::Drop
+    );
+    assert_eq!(udp.forwarded.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn quic_blocking_and_udp_off_apply_to_known_target_sockets() {
+    let t0 = Instant::now();
+    let (r, udp) = udp_rig(InterceptSettings {
+        block_quic: true,
+        ..InterceptSettings::default()
+    });
+    r.register_udp(GAME_UDP, SERVER, GAME, FlowAction::Redirect { group: 0 });
+    r.send(ping(GAME_UDP, SERVER), app_addr(), t0);
+    // 没有登记、按套接字认出的 443：照样阻断
+    assert_eq!(
+        r.send(ping(GAME_UDP, "203.0.113.9:443"), app_addr(), t0).0,
+        Outcome::Drop
+    );
+    assert_eq!(udp.forwarded.lock().unwrap().len(), 1);
+
+    // 关了 UDP 代理：只劫持 53，其余照常直连
+    let (r, udp) = udp_rig(InterceptSettings {
+        udp_enabled: false,
+        ..InterceptSettings::default()
+    });
+    r.register_udp(
+        GAME_UDP,
+        "8.8.8.8:53",
+        GAME,
+        FlowAction::Redirect { group: 0 },
+    );
+    assert_eq!(
+        r.send(ping(GAME_UDP, "8.8.8.8:53"), app_addr(), t0).0,
+        Outcome::Drop
+    );
+    let game = ping(GAME_UDP, SERVER);
+    assert_eq!(r.send(game.clone(), app_addr(), t0).0, Outcome::Pass);
+    assert_eq!(udp.forwarded.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_refused_datagram_is_dropped_never_sent_directly() {
+    // C-NET-03：中继拒收（会话超限、队列满）也不直连
+    let udp = Arc::new(FakeUdp {
+        refuse: true,
+        ..FakeUdp::default()
+    });
+    let r = rig_full(InterceptSettings::default(), true, Some(udp));
+    r.register_udp(GAME_UDP, SERVER, GAME, FlowAction::Redirect { group: 0 });
+    assert_eq!(
+        r.send(ping(GAME_UDP, SERVER), app_addr(), Instant::now()).0,
+        Outcome::Drop
+    );
+}
+
+#[test]
+fn idle_udp_sockets_are_swept_with_the_connections() {
+    let (r, _) = udp_rig(InterceptSettings::default());
+    let t0 = Instant::now();
+    r.register_udp(GAME_UDP, SERVER, GAME, FlowAction::Redirect { group: 0 });
+    r.send(ping(GAME_UDP, SERVER), app_addr(), t0);
+    r.engine.sweep(t0 + crate::divert::udp::UDP_IDLE);
+    assert!(r.engine.udp_sockets().is_empty());
+    // 回收之后、又没有登记：不认识，放回
+    r.engine.flows.clear();
+    assert_eq!(
+        r.send(ping(GAME_UDP, SERVER), app_addr(), t0).0,
+        Outcome::Pass
+    );
 }

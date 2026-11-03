@@ -144,6 +144,7 @@ fn target_tcp_reaches_the_relay_and_non_target_tcp_does_not() {
         dir: windivert_dir(),
         relays,
         map: nat.clone(),
+        udp: None,
         resolver: Arc::new(SystemProcesses),
         receivers: 2,
     });

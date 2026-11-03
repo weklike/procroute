@@ -134,6 +134,11 @@ impl NetworkWorker {
         &self.shared.engine
     }
 
+    /// 在本句柄上注入自己拼的包（UDP 回包）。
+    pub fn injector(&self) -> Injector {
+        Injector(Arc::clone(&self.shared))
+    }
+
     /// 停止全部线程并关闭句柄。连接跟踪不动，由后端决定是否清空。
     pub fn stop(mut self) {
         self.shutdown();
@@ -156,6 +161,23 @@ impl NetworkWorker {
 impl Drop for NetworkWorker {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// 在 NETWORK 层句柄上注入包：重算校验和后发送。可以在任何线程上使用。
+#[derive(Clone)]
+pub struct Injector(Arc<Shared>);
+
+impl std::fmt::Debug for Injector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Injector").finish_non_exhaustive()
+    }
+}
+
+impl Injector {
+    /// 注入一个包。返回是否成功（句柄已关闭、接口已消失时失败，包丢弃）。
+    pub fn inject(&self, pkt: &mut [u8], addr: &mut Address) -> bool {
+        self.0.api.calc_checksums(pkt, addr) && self.0.handle.send(pkt, addr).is_ok()
     }
 }
 
