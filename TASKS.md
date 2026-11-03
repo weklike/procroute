@@ -160,8 +160,21 @@
   `target/sandbox/build`），连同锁定的 WinDivert 文件只读映射进沙盒，由 `xtask/sandbox/run.ps1` 复制到沙盒本地
   磁盘后逐个运行，结果写回 `target/sandbox/out` 后沙盒自动关机。沙盒启用默认 NAT 网络（WFP 测试要区分「被过滤器
   拒绝」与「没有路由」）。登录命令不是管理员时整次运行判为失败。2026-10-29 首次运行 4 个文件 6 个测试全部通过。
-  以服务方式运行的联调（`cargo xtask dev`、收窄令牌后的 TUN）还没有放进沙盒。客户机关机后，沙盒的客户端窗口偶尔
-  不退出，下一次运行会提示「已有一个 Windows Sandbox 在运行」，关掉该窗口即可（2026-11-03 遇到一次）。
+  客户机关机后，沙盒的客户端窗口偶尔不退出，下一次运行会提示「已有一个 Windows Sandbox 在运行」，关掉该窗口
+  即可（2026-11-03 遇到一次）。
+- 沙盒联调（2026-11-03）：`cargo xtask sandbox-dev` 在开发机上编译前端生产构建、服务（调试构建 +
+  `insecure-skip-client-auth`）与界面（`tauri/custom-protocol`），连同锁定的 sing-box 映射进沙盒，由
+  `xtask/sandbox/dev.ps1` 装到 `C:\Program Files\ProcRoute`，在可见的控制台里运行 `procroute-svc --console`
+  （日志同时写到 `target/sandbox/dev-out/svc.log`），再启动界面并在桌面放快捷方式；沙盒保持打开，开启剪贴板
+  便于粘贴节点链接。与 `sandbox-test` 共用 `xtask/src/sandbox.rs`。实测要点：
+  - Windows Sandbox 的系统镜像不带 WebView2 运行时；沙盒也上不了外网（开发机经本地代理上网，沙盒的 NAT 不走它，
+    在沙盒里下载 WebView2 报 `Unable to connect to the remote server`）。所以把开发机已安装的运行时版本目录只读
+    映射进沙盒，复制到本地盘、给 AppContainer 授权后经 `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` 使用。
+  - 同一原因，沙盒里连代理服务器多半也会失败：沙盒联调适合看界面与服务的交互，走代理的效果要在能直连外网的虚拟机里看。
+  - 控制台模式下服务收窄令牌后（移除 21 个特权）控制管道正常监听，界面能连上。收窄令牌后 wintun 能否创建
+    （M1 剩下的一条）需要在沙盒里启动一次 TUN 会话确认。
+  - std 在 Windows 上创建子进程总是继承可继承句柄，`cmd /C start` 也一样（实测），沙盒启动器会一直拿着调用方的
+    输出管道；改经 PowerShell 的 `Start-Process`（ShellExecute）启动。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
 - sing-box 锁定为 1.14.4（`third_party/sing-box/lock.json`，单独 PR，C-DEP-04）。`cargo xtask fetch-deps` 用系统自带的
   `curl.exe` / `tar.exe` 拉取，SHA256 用 Windows CNG（`platform-win::hash`，T-056 校验 sing-box 时复用），

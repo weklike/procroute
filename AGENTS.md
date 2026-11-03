@@ -87,7 +87,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | 拉取并校验第三方二进制 | `cargo xtask fetch-deps`（Windows；按 `third_party/*/lock.json` 校验 SHA256，输出到各自的 `third_party/<组件>/bin/`：sing-box、WinDivert） |
 | 需要管理员的测试（ETW） | 管理员终端：`cargo nextest run -p procroute-platform-win -p procroute-procwatch --features admin-tests`（只开私有 ETW 进程事件会话，不加载驱动、不改网络与系统设置；开发机或虚拟机均可） |
 | 驱动相关测试（只在虚拟机） | 管理员终端：`cargo nextest run -p procroute-intercept --features vm-tests`（会安装并加载 WinDivert 驱动，禁止在开发机上运行，C-TEST-04） |
-| 本地开发运行 | 开发机：`pnpm -C app dev`（浏览器里打开，模拟 IPC，不连真实服务）；桌面外壳：PowerShell 里 `$env:VITE_IPC_MOCK='1'; pnpm -C app tauri dev`（同样用模拟 IPC）；完整联调：在测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
+| 本地开发运行 | 开发机：`pnpm -C app dev`（浏览器里打开，模拟 IPC，不连真实服务）；桌面外壳：PowerShell 里 `$env:VITE_IPC_MOCK='1'; pnpm -C app exec tauri dev`（同样用模拟 IPC；`tauri` 不是 package.json 里的脚本，要经 `exec`）；完整联调：开发机上运行 `cargo xtask sandbox-dev`（在 Windows Sandbox 里以控制台模式运行真实的 svc 与界面，沙盒保持打开，关窗口即结束），或在装有工具链的测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
 | 构建桌面客户端 | `pnpm -C app tauri build --debug --no-bundle`（先跑前端生产构建，再编译 `procroute-ui.exe`；不出安装包） |
 | 打包安装包 | `cargo xtask bundle` |
 | 端到端测试 | `cargo xtask e2e --vm <name>`（只在 Hyper-V 虚拟机中运行） |

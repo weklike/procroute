@@ -4,7 +4,7 @@
 // 只有 features/<领域>/api.ts 与 hooks/ 可以导入本文件；组件禁止直接调用（C-CODE-09，lint 强制）。
 //
 // 开发构建里、且不在 Tauri 里运行时（`pnpm -C app dev` 用浏览器打开、或单元测试），改用 ./mock
-// 里的内存模拟服务，方便在开发机上做界面而不连真实服务；`VITE_IPC_MOCK=1 pnpm -C app tauri dev`
+// 里的内存模拟服务，方便在开发机上做界面而不连真实服务；`VITE_IPC_MOCK=1 pnpm -C app exec tauri dev`
 // 在桌面外壳里也用它（开发机上不运行服务，AGENTS 第 8 节第 5 条）。生产构建中 `import.meta.env.DEV`
 // 为常量 false，模拟服务连同示例数据被整体剔除，不会随安装包分发（C-SEC-09）。
 import { invoke, isTauri } from '@tauri-apps/api/core'
