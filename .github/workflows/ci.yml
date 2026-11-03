@@ -81,4 +81,6 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - name: 生产构建不含模拟服务与示例数据（C-SEC-09）
-        run: "! grep -rlE 'createMockService|example\.(net|com)' dist"
+        # 块标量：双引号字符串里的 `\.` 不是合法的 YAML 转义，整个工作流会解析失败
+        run: |
+          ! grep -rlE 'createMockService|example\.(net|com)' dist
