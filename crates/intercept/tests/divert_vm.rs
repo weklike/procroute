@@ -12,7 +12,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use procroute_intercept::divert::ffi::{Address, Layer, Param, Shutdown, WinDivert, event, flags};
@@ -22,8 +23,9 @@ use procroute_intercept::divert::socket::{
 use procroute_intercept::{Counters, ExclusionSet, FlowPolicy, InterceptSettings, ProcessKey};
 use procroute_proto::event::Network;
 
-/// 文档用地址（TEST-NET-1，RFC 5737）：没有人应答，connect 一直挂到超时。
-const UNANSWERED: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+/// 文档用地址（TEST-NET-1，RFC 5737），不是回环，CONNECT 事件不会被过滤器滤掉。通常没有人应答
+/// （connect 挂到超时），但宿主网络上的透明代理会立即接受连接，测试对两种情况都成立。
+const TEST_NET: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 /// 设置后，[`child_connect_helper`] 连接这个地址（子进程入口）。
 const CHILD_ENV: &str = "PROCROUTE_VM_CHILD_CONNECT";
 
@@ -137,10 +139,19 @@ fn socket_monitor_registers_only_target_connects() {
     ));
     let monitor = SocketMonitor::start(&wd, attributor).expect("start the SOCKET layer monitor");
 
-    // 目标进程（本测试进程）：connect 挂起期间已经登记
-    let target_remote = SocketAddr::from((UNANSWERED, 9));
-    let pending = std::thread::spawn(move || {
-        TcpStream::connect_timeout(&target_remote, Duration::from_secs(3))
+    // 目标进程（本测试进程）：connect 时登记。连上了就一直开着，等主线程放行再关闭
+    let target_remote = SocketAddr::from((TEST_NET, 9));
+    let connected = Arc::new(AtomicBool::new(false));
+    let (release, released) = mpsc::channel::<()>();
+    let pending = std::thread::spawn({
+        let connected = connected.clone();
+        move || {
+            if let Ok(stream) = TcpStream::connect_timeout(&target_remote, Duration::from_secs(3)) {
+                connected.store(true, Ordering::SeqCst);
+                let _ = released.recv();
+                drop(stream);
+            }
+        }
     });
     let find = |remote: SocketAddr| table.entries().into_iter().find(|f| f.key.remote == remote);
     wait_until(
@@ -156,7 +167,7 @@ fn socket_monitor_registers_only_target_connects() {
     assert!(!flow.key.local.ip().is_loopback(), "{flow:?}");
 
     // 非目标进程（子进程）：事件被看到、被判定，但不登记（C-NET-02）
-    let other_remote = SocketAddr::from((UNANSWERED, 10));
+    let other_remote = SocketAddr::from((TEST_NET, 10));
     let mut child = Command::new(std::env::current_exe().expect("test executable"))
         .args(["--exact", "child_connect_helper", "--test-threads=1"])
         .env(CHILD_ENV, other_remote.to_string())
@@ -184,9 +195,13 @@ fn socket_monitor_registers_only_target_connects() {
     );
     assert!(child.wait().expect("wait for the child").success());
 
-    // 连接超时、套接字关闭后，CLOSE 事件撤销登记
-    let result = pending.join().expect("connect thread");
-    assert!(result.is_err(), "nobody should answer at {target_remote}");
+    // 连上的套接字开着期间登记一直在（子进程的事件不会误删它）
+    if connected.load(Ordering::SeqCst) {
+        assert!(find(target_remote).is_some(), "{:?}", table.entries());
+    }
+    // 套接字关闭（连上的在这里放行后关闭，连不上的超时后关闭）后，CLOSE 事件撤销登记
+    drop(release);
+    pending.join().expect("connect thread");
     wait_until(
         "the closed socket to be forgotten",
         Duration::from_secs(5),
