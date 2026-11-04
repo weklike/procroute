@@ -18,7 +18,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use procroute_core_mgr::config_gen::TUN_ADDRESSES;
-use procroute_platform_win::wfp::{FailClosedFilters, TunRanges};
+use procroute_platform_win::wfp::{FailClosedFilters, TunRanges, WfpError};
 use procroute_procwatch::Change;
 use procroute_procwatch::watcher::{Options, Watcher};
 use procroute_proto::profile::{MatchType, Profile};
@@ -88,27 +88,37 @@ struct Protector {
 
 impl Protector {
     fn protect(&mut self, path: &str) {
-        let key = normalize_path(path);
-        if self.protected.contains(&key) {
-            return;
+        let Self { filters, protected } = self;
+        apply_once(protected, path, |exe| filters.protect(exe));
+    }
+}
+
+/// 给一个可执行文件加过滤器，同一文件（按规范化路径）只加一次。`done` 记着加过的。
+pub(crate) fn apply_once(
+    done: &mut HashSet<String>,
+    path: &str,
+    add: impl FnOnce(&Path) -> Result<(), WfpError>,
+) {
+    let key = normalize_path(path);
+    if done.contains(&key) {
+        return;
+    }
+    let exe = Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match add(Path::new(path)) {
+        Ok(()) => {
+            tracing::debug!(exe = %exe, "filters added");
+            done.insert(key);
         }
-        let exe = Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        match self.filters.protect(Path::new(path)) {
-            Ok(()) => {
-                tracing::debug!(exe = %exe, "fail-closed filters added");
-                self.protected.insert(key);
-            }
-            // 文件不存在（规则里写的路径还没安装）等情况：之后进程真的运行时会被追踪补上
-            Err(e) => tracing::debug!(exe = %exe, error = %e, "cannot protect executable"),
-        }
+        // 文件不存在（规则里写的路径还没安装）等情况：之后进程真的运行时会被追踪补上
+        Err(e) => tracing::debug!(exe = %exe, error = %e, "cannot add filters"),
     }
 }
 
 /// 完整路径规则给出的可执行文件。
-fn path_rules(profile: &Profile) -> Vec<String> {
+pub(crate) fn path_rules(profile: &Profile) -> Vec<String> {
     profile
         .groups
         .iter()
@@ -164,6 +174,7 @@ mod tests {
             fail_policy: FailPolicy::Block,
             dns: DnsSettings::default(),
             udp: UdpSettings::default(),
+            icmp: Default::default(),
             groups: vec![
                 Group {
                     tag: "a".into(),

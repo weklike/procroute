@@ -9,7 +9,8 @@ use ts_rs::TS;
 /// 当前方案的 schema 版本。结构变更必须加一并提供迁移（C-ARCH-06）。
 ///
 /// - 2：`dns.remote_server`（用户配置的远程 DNS 服务器）。
-pub const PROFILE_SCHEMA_VERSION: u32 = 2;
+/// - 3：`icmp`（全局 ping 阻断）。
+pub const PROFILE_SCHEMA_VERSION: u32 = 3;
 
 /// 工作模式。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -89,6 +90,15 @@ impl Default for UdpSettings {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct IcmpSettings {
+    /// 会话期间挡住本机所有进程发往外部的 ICMP 回显请求（ping）。系统 ping 接口发的包分不出是哪个进程的，
+    /// 只能全部一起挡，所以影响全局：默认关闭，开启前需用户确认（C-NET-02 的例外，docs/adr/0003）。
+    #[serde(default)]
+    pub block_all_ping: bool,
+}
+
 /// 匹配项类型。求值顺序见 `procroute-rules`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -147,6 +157,8 @@ pub struct Profile {
     pub dns: DnsSettings,
     #[serde(default)]
     pub udp: UdpSettings,
+    #[serde(default)]
+    pub icmp: IcmpSettings,
     #[serde(default)]
     pub groups: Vec<Group>,
     /// 排除规则，优先级最高，命中即直连。
@@ -241,6 +253,15 @@ mod tests {
     fn system_dns_takeover_is_never_the_default() {
         // C-NET-09
         assert_eq!(DnsStrategy::default(), DnsStrategy::Sniff);
+    }
+
+    #[test]
+    fn blocking_all_ping_is_never_the_default() {
+        // C-NET-02 的例外只能由用户选择（docs/adr/0003）
+        assert!(!IcmpSettings::default().block_all_ping);
+        let p: Profile =
+            serde_json::from_str(r#"{"schema_version":3,"id":"a","name":"n","icmp":{}}"#).unwrap();
+        assert!(!p.icmp.block_all_ping);
     }
 
     #[test]

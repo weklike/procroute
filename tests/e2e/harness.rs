@@ -383,6 +383,7 @@ pub fn profile(node_id: &str, exe: &str) -> Profile {
         fail_policy: FailPolicy::Block,
         dns: Default::default(),
         udp: Default::default(),
+        icmp: Default::default(),
         groups: vec![Group {
             tag: "e2e".into(),
             outbound: node_id.into(),
@@ -399,6 +400,15 @@ pub fn profile(node_id: &str, exe: &str) -> Profile {
 
 /// 起服务、导入指向 `node` 的节点、保存按 `exe` 命中的方案并启动会话。
 pub fn start_session(node: &Node, exe: &str) -> (Service, Client) {
+    start_session_with(node, exe, |_| {})
+}
+
+/// 同 [`start_session`]，存盘前再改一改方案。
+pub fn start_session_with(
+    node: &Node,
+    exe: &str,
+    change: impl FnOnce(&mut Profile),
+) -> (Service, Client) {
     let service = Service::start();
     let mut c = Client::connect();
     c.call(
@@ -415,7 +425,8 @@ pub fn start_session(node: &Node, exe: &str) -> (Service, Client) {
         .and_then(|n| n["id"].as_str())
         .expect("the imported node")
         .to_owned();
-    let p = profile(&node_id, exe);
+    let mut p = profile(&node_id, exe);
+    change(&mut p);
     c.call("profile.save", serde_json::to_value(&p).expect("profile"));
     let started = c.try_call("session.start", json!({ "profile_id": p.id }));
     assert!(
@@ -425,7 +436,9 @@ pub fn start_session(node: &Node, exe: &str) -> (Service, Client) {
     );
     let status = started.unwrap_or_default();
     assert_eq!(status["state"], "running", "{status}");
-    assert_eq!(status["components"]["driver"], "active", "{status}");
+    if p.mode == Mode::Precise {
+        assert_eq!(status["components"]["driver"], "active", "{status}");
+    }
     (service, c)
 }
 

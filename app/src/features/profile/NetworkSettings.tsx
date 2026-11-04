@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 网络行为：出错时策略、DNS、UDP。
 // fail_policy 默认阻断，放行只能由用户在这里显式选择（C-NET-03）；
-// 接管系统 DNS 影响全局，选中前必须再次确认（C-NET-09）。
+// 接管系统 DNS 影响全局，选中前必须再次确认（C-NET-09）；阻断全部 ping 同样影响全局（docs/adr/0003）。
 // 远程 DNS 服务器由用户填写，不提供任何内置地址（C-SEC-09）。
 import { useState, type ReactNode } from 'react'
 import { useFormContext, useWatch } from 'react-hook-form'
@@ -36,6 +36,42 @@ function Option({ label, hint, children }: OptionProps) {
   )
 }
 
+type ConfirmProps = {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  title: string
+  body: string
+  confirmLabel: string
+  onConfirm: () => void
+}
+
+function ConfirmDialog({ open, onOpenChange, title, body, confirmLabel, onConfirm }: ConfirmProps) {
+  const { t } = useTranslation()
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{body}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            onClick={() => {
+              onConfirm()
+              onOpenChange(false)
+            }}
+          >
+            {confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export default function NetworkSettings() {
   const { t } = useTranslation()
   const {
@@ -45,8 +81,10 @@ export default function NetworkSettings() {
     formState: { errors },
   } = useFormContext<ProfileForm>()
   const dns = useWatch({ control, name: 'dns.strategy' })
+  const blockAllPing = useWatch({ control, name: 'icmp.block_all_ping' })
   const remoteError = errors.dns?.remote_server?.message
   const [confirming, setConfirming] = useState(false)
+  const [confirmingPing, setConfirmingPing] = useState(false)
   const radio = 'accent-brand mt-0.5 size-4'
 
   return (
@@ -102,37 +140,54 @@ export default function NetworkSettings() {
             <FieldError id="dns-remote-server-error" message={remoteError} />
           </div>
         </fieldset>
-        <fieldset className="flex flex-col gap-2.5">
-          <legend className="mb-1 text-[13px] font-semibold">{t('profile.udpLegend')}</legend>
-          <Option label={t('profile.udp.enabled')} hint={t('profile.udp.enabledHint')}>
-            <input type="checkbox" className={radio} {...register('udp.enabled')} />
-          </Option>
-          <Option label={t('profile.udp.blockQuic')} hint={t('profile.udp.blockQuicHint')}>
-            <input type="checkbox" className={radio} {...register('udp.block_quic')} />
-          </Option>
-        </fieldset>
-      </div>
-      <Dialog open={confirming} onOpenChange={setConfirming}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('profile.dns.confirmTitle')}</DialogTitle>
-            <DialogDescription>{t('profile.dns.confirmBody')}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirming(false)}>
-              {t('common.cancel')}
-            </Button>
-            <Button
-              onClick={() => {
-                setValue('dns.strategy', 'system_takeover', { shouldDirty: true })
-                setConfirming(false)
-              }}
+        <div className="flex flex-col gap-4">
+          <fieldset className="flex flex-col gap-2.5">
+            <legend className="mb-1 text-[13px] font-semibold">{t('profile.udpLegend')}</legend>
+            <Option label={t('profile.udp.enabled')} hint={t('profile.udp.enabledHint')}>
+              <input type="checkbox" className={radio} {...register('udp.enabled')} />
+            </Option>
+            <Option label={t('profile.udp.blockQuic')} hint={t('profile.udp.blockQuicHint')}>
+              <input type="checkbox" className={radio} {...register('udp.block_quic')} />
+            </Option>
+          </fieldset>
+          <fieldset className="flex flex-col gap-2.5">
+            <legend className="mb-1 text-[13px] font-semibold">{t('profile.icmpLegend')}</legend>
+            <Option
+              label={t('profile.icmp.blockAllPing')}
+              hint={t('profile.icmp.blockAllPingHint')}
             >
-              {t('profile.dns.confirm')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              <input
+                type="checkbox"
+                className={radio}
+                checked={blockAllPing}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setConfirmingPing(true)
+                  } else {
+                    setValue('icmp.block_all_ping', false, { shouldDirty: true })
+                  }
+                }}
+              />
+            </Option>
+          </fieldset>
+        </div>
+      </div>
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title={t('profile.dns.confirmTitle')}
+        body={t('profile.dns.confirmBody')}
+        confirmLabel={t('profile.dns.confirm')}
+        onConfirm={() => setValue('dns.strategy', 'system_takeover', { shouldDirty: true })}
+      />
+      <ConfirmDialog
+        open={confirmingPing}
+        onOpenChange={setConfirmingPing}
+        title={t('profile.icmp.confirmTitle')}
+        body={t('profile.icmp.confirmBody')}
+        confirmLabel={t('profile.icmp.confirm')}
+        onConfirm={() => setValue('icmp.block_all_ping', true, { shouldDirty: true })}
+      />
     </section>
   )
 }

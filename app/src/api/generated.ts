@@ -3,7 +3,7 @@
 
 export const IPC_PROTOCOL_VERSION = 1;
 
-export const PROFILE_SCHEMA_VERSION = 2;
+export const PROFILE_SCHEMA_VERSION = 3;
 
 /**
  * 进入 `blocked` 的原因。只给原因码，文案由界面的 i18n 资源提供。
@@ -228,6 +228,13 @@ export type HelloParams = { protocol_version: number, client_version: string, };
  */
 export type HelloResult = { protocol_version: number, service_version: string, };
 
+export type IcmpSettings = { 
+/**
+ * 会话期间挡住本机所有进程发往外部的 ICMP 回显请求（ping）。系统 ping 接口发的包分不出是哪个进程的，
+ * 只能全部一起挡，所以影响全局：默认关闭，开启前需用户确认（C-NET-02 的例外，docs/adr/0003）。
+ */
+block_all_ping: boolean, };
+
 /**
  * 导入时被跳过的一行及原因。
  */
@@ -382,7 +389,7 @@ export type ProcessListResult = { processes: Array<ProcessInfo>, };
 /**
  * 方案。
  */
-export type Profile = { schema_version: number, id: string, name: string, mode: Mode, fail_policy: FailPolicy, dns: DnsSettings, udp: UdpSettings, groups: Array<Group>, 
+export type Profile = { schema_version: number, id: string, name: string, mode: Mode, fail_policy: FailPolicy, dns: DnsSettings, udp: UdpSettings, icmp: IcmpSettings, groups: Array<Group>, 
 /**
  * 排除规则，优先级最高，命中即直连。
  */

@@ -146,6 +146,7 @@ pub(crate) mod tests {
             fail_policy: Default::default(),
             dns: Default::default(),
             udp: Default::default(),
+            icmp: Default::default(),
             groups: vec![Group {
                 tag: "game".into(),
                 outbound: "hk-auto".into(),

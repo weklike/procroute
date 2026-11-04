@@ -31,6 +31,7 @@ fn profile() -> Profile {
         fail_policy: FailPolicy::Allow,
         dns: DnsSettings::default(),
         udp: UdpSettings::default(),
+        icmp: Default::default(),
         groups: vec![
             Group {
                 tag: "game".into(),

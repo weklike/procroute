@@ -18,7 +18,7 @@ use crate::validate::{ValidationIssue, validate};
 type Step = fn(Value) -> Result<Value, String>;
 
 /// `STEPS[i]` 把 v(i+1) 升到 v(i+2)。
-const STEPS: &[Step] = &[v1_to_v2];
+const STEPS: &[Step] = &[v1_to_v2, v2_to_v3];
 
 /// v2 新增 `dns.remote_server`：旧方案没有远程 DNS 服务器。
 fn v1_to_v2(mut value: Value) -> Result<Value, String> {
@@ -30,6 +30,14 @@ fn v1_to_v2(mut value: Value) -> Result<Value, String> {
         }
         Some(_) => return Err("dns 必须是对象".into()),
     }
+    Ok(value)
+}
+
+/// v3 新增 `icmp`：旧方案不挡 ping，行为不变（C-NET-02）。
+fn v2_to_v3(mut value: Value) -> Result<Value, String> {
+    let obj = value.as_object_mut().ok_or("顶层必须是对象")?;
+    obj.entry("icmp")
+        .or_insert_with(|| serde_json::json!({ "block_all_ping": false }));
     Ok(value)
 }
 
@@ -149,10 +157,13 @@ mod tests {
     fn v1_profiles_gain_an_empty_remote_dns_server() {
         let text = fs::read_to_string(fixtures_dir().join("v1.json")).unwrap();
         let v1: Value = serde_json::from_str(&text).unwrap();
-        let v2 = migrate_value(v1).unwrap();
-        assert_eq!(v2["schema_version"], 2);
-        assert_eq!(v2["dns"]["remote_server"], Value::Null);
-        assert_eq!(v2["dns"]["strategy"], "sniff", "existing fields are kept");
+        let migrated = migrate_value(v1).unwrap();
+        assert_eq!(migrated["schema_version"], PROFILE_SCHEMA_VERSION);
+        assert_eq!(migrated["dns"]["remote_server"], Value::Null);
+        assert_eq!(
+            migrated["dns"]["strategy"], "sniff",
+            "existing fields are kept"
+        );
         let p = load_profile(&text).unwrap();
         assert_eq!(p.dns.remote_server, None);
         // dns 缺失时用默认值；dns 不是对象时报错而不是丢弃
@@ -172,6 +183,30 @@ mod tests {
             p.dns.remote_server.as_deref(),
             Some("tls://198.51.100.53:853")
         );
+    }
+
+    #[test]
+    fn older_profiles_do_not_start_blocking_ping() {
+        for version in ["v1.json", "v2.json"] {
+            let text = fs::read_to_string(fixtures_dir().join(version)).unwrap();
+            let old: Value = serde_json::from_str(&text).unwrap();
+            assert!(old.get("icmp").is_none(), "{version}");
+            let migrated = migrate_value(old).unwrap();
+            assert_eq!(migrated["icmp"]["block_all_ping"], false, "{version}");
+            assert!(!load_profile(&text).unwrap().icmp.block_all_ping);
+        }
+        assert!(matches!(
+            migrate_value(serde_json::json!({ "schema_version": 2, "icmp": 5 }))
+                .and_then(|v| serde_json::from_value::<Profile>(v)
+                    .map_err(|e| ConfigError::Shape(e.to_string()))),
+            Err(ConfigError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn v3_fixture_keeps_its_ping_setting() {
+        let text = fs::read_to_string(fixtures_dir().join("v3.json")).unwrap();
+        assert!(load_profile(&text).unwrap().icmp.block_all_ping);
     }
 
     #[test]

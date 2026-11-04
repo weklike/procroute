@@ -179,6 +179,7 @@ mod tests {
             fail_policy: FailPolicy::Block,
             dns: DnsSettings::default(),
             udp: UdpSettings::default(),
+            icmp: Default::default(),
             groups,
             exclude,
         }
