@@ -118,7 +118,7 @@ mod tests {
             "\"profile.save\": Profile;",
             "\"conn.subscribe\": ConnEvent;",
             "export const IPC_PROTOCOL_VERSION = 1;",
-            "export const PROFILE_SCHEMA_VERSION = 2;",
+            "export const PROFILE_SCHEMA_VERSION = 3;",
         ] {
             assert!(ts.contains(needle), "missing `{needle}` in:\n{ts}");
         }

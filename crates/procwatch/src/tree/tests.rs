@@ -41,6 +41,7 @@ fn engine_for(groups: Vec<Group>) -> RuleEngine {
         fail_policy: FailPolicy::Block,
         dns: DnsSettings::default(),
         udp: UdpSettings::default(),
+        icmp: Default::default(),
         groups,
         exclude: vec![rule(MatchType::Name, "updater.exe")],
     })

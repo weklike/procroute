@@ -18,6 +18,15 @@ fn ping_exe() -> String {
 
 /// 导入一个节点，保存一个按 [`ping_exe`] 完整路径命中、引用该节点的精确模式方案，返回方案 id。
 async fn precise_profile(f: &Fixture, policy: FailPolicy) -> String {
+    profile_with(f, policy, |_| {}).await
+}
+
+/// 同上，存盘前再改一改方案。
+async fn profile_with(
+    f: &Fixture,
+    policy: FailPolicy,
+    change: impl FnOnce(&mut Profile),
+) -> String {
     f.call(
         "node.import",
         json!({ "kind": "share_links", "text": TROJAN }),
@@ -32,6 +41,7 @@ async fn precise_profile(f: &Fixture, policy: FailPolicy) -> String {
     p.groups[0].outbound = node_id;
     p.groups[0].matchers[0].kind = MatchType::Path;
     p.groups[0].matchers[0].value = ping_exe();
+    change(&mut p);
     f.call("profile.save", to_json(&p).expect("json"))
         .await
         .expect("save");
@@ -180,4 +190,139 @@ async fn precise_allow_withdraws_interception_when_the_kernel_gives_up() {
         .expect("restart");
     assert_eq!(f.backends.handle(1).installed_filters(), 1);
     f.call("session.stop", json!({})).await.expect("stop");
+}
+
+#[tokio::test]
+async fn block_sessions_block_the_targets_other_protocols_until_they_stop() {
+    // C-NET-07：拦截层管不到的协议按 fail_policy。完整路径规则的目标一开始就挡住
+    let f = fixture("protocols-block");
+    let id = precise_profile(&f, FailPolicy::Block).await;
+    f.call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect("start");
+    assert_eq!(*f.protocols.opened.lock().expect("opened"), [false]);
+    assert_eq!(*f.protocols.targets.lock().expect("targets"), [ping_exe()]);
+    assert_eq!(f.protocols.closed.load(Ordering::SeqCst), 0);
+    f.call("session.stop", json!({})).await.expect("stop");
+    assert_eq!(f.protocols.closed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn targets_found_by_tracking_are_blocked_too() {
+    // 名称规则要等进程追踪报到
+    let f = fixture("protocols-tracked");
+    let id = profile_with(&f, FailPolicy::Block, |p| {
+        p.groups[0].matchers[0].kind = MatchType::Name;
+        p.groups[0].matchers[0].value = "ping.exe".into();
+    })
+    .await;
+    f.call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect("start");
+    let mut ping = std::process::Command::new(ping_exe())
+        .args(["-n", "30", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("start ping");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let seen = loop {
+        let targets = f.protocols.targets.lock().expect("targets").clone();
+        if !targets.is_empty() || std::time::Instant::now() >= deadline {
+            break targets;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let _ = ping.kill();
+    let _ = ping.wait();
+    f.call("session.stop", json!({})).await.expect("stop");
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].to_lowercase().ends_with("ping.exe"), "{seen:?}");
+}
+
+#[tokio::test]
+async fn allow_sessions_install_no_filters_unless_ping_is_blocked() {
+    // `allow` 是用户选择的放行，不碰任何过滤器；开关打开时只挡 ping，不挡目标进程的其他协议
+    let f = fixture("protocols-allow");
+    let id = precise_profile(&f, FailPolicy::Allow).await;
+    f.call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect("start");
+    f.call("session.stop", json!({})).await.expect("stop");
+    assert!(f.protocols.opened.lock().expect("opened").is_empty());
+
+    let id = profile_with(&f, FailPolicy::Allow, |p| p.icmp.block_all_ping = true).await;
+    f.call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect("start");
+    assert_eq!(*f.protocols.opened.lock().expect("opened"), [true]);
+    assert!(f.protocols.targets.lock().expect("targets").is_empty());
+    f.call("session.stop", json!({})).await.expect("stop");
+}
+
+#[tokio::test]
+async fn sessions_refuse_to_start_without_the_filters_they_need() {
+    let f = fixture_with_protocols(
+        "protocols-unavailable",
+        FakeProtocols {
+            fail: true,
+            ..FakeProtocols::default()
+        },
+    );
+    let id = profile_with(&f, FailPolicy::Allow, |p| p.icmp.block_all_ping = true).await;
+    assert_eq!(
+        code(f.call("session.start", json!({ "profile_id": id })).await),
+        ErrorCode::SessionFailClosedUnsupported
+    );
+    assert_eq!(f.launcher.launch_count(), 0, "nothing was launched");
+    assert_eq!(f.services.session_snapshot().state, SessionState::Stopped);
+    // 不需要过滤器的方案不受影响
+    let id = precise_profile(&f, FailPolicy::Allow).await;
+    f.call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect("start");
+    f.call("session.stop", json!({})).await.expect("stop");
+}
+
+#[tokio::test]
+async fn a_failed_start_closes_the_filters_again() {
+    let f = fixture_with_backends(
+        "protocols-failed-start",
+        FakeBackends {
+            fail: true,
+            ..FakeBackends::default()
+        },
+    );
+    let id = precise_profile(&f, FailPolicy::Block).await;
+    assert_eq!(
+        code(f.call("session.start", json!({ "profile_id": id })).await),
+        ErrorCode::DriverNotLoaded
+    );
+    assert_eq!(f.protocols.opened.lock().expect("opened").len(), 1);
+    assert_eq!(f.protocols.closed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn filters_follow_the_session_when_the_kernel_gives_up() {
+    let gave_up = KernelState::Stopped(StopReason::CrashLoop);
+    // `allow`：会话结束，ping 不能还被挡着
+    let f = fixture("protocols-give-up-allow");
+    let id = profile_with(&f, FailPolicy::Allow, |p| p.icmp.block_all_ping = true).await;
+    f.call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect("start");
+    f.launcher.report(0, gave_up.clone());
+    assert_eq!(f.services.session_snapshot().state, SessionState::Stopped);
+    assert_eq!(f.protocols.closed.load(Ordering::SeqCst), 1);
+
+    // `block`：会话还在（blocked），过滤器也还在，直到用户停止
+    let f = fixture("protocols-give-up-block");
+    let id = profile_with(&f, FailPolicy::Block, |p| p.icmp.block_all_ping = true).await;
+    f.call("session.start", json!({ "profile_id": id }))
+        .await
+        .expect("start");
+    f.launcher.report(0, gave_up);
+    assert_eq!(f.services.session_snapshot().state, SessionState::Blocked);
+    assert_eq!(f.protocols.closed.load(Ordering::SeqCst), 0);
+    f.call("session.stop", json!({})).await.expect("stop");
+    assert_eq!(f.protocols.closed.load(Ordering::SeqCst), 1);
 }

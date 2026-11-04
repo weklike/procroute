@@ -53,6 +53,7 @@ export const profileSchema = z
         .refine((v) => v === null || DNS_SERVER.test(v), 'profile.validation.dnsServer'),
     }),
     udp: z.object({ enabled: z.boolean(), block_quic: z.boolean() }),
+    icmp: z.object({ block_all_ping: z.boolean() }),
     groups: z.array(groupSchema),
     exclude: z.array(ruleSchema),
   })
@@ -77,7 +78,7 @@ export type ProfileValues = z.output<typeof profileSchema>
 const sameShape: Profile = {} as ProfileValues
 void sameShape
 
-/** 新方案：所有安全相关的选项取默认值（fail-closed、DNS 嗅探，C-NET-03、C-NET-09）。 */
+/** 新方案：所有安全相关的选项取默认值（fail-closed、DNS 嗅探、不挡全局 ping，C-NET-03、C-NET-09、C-NET-02）。 */
 export function newProfile(name: string): Profile {
   return {
     schema_version: PROFILE_SCHEMA_VERSION,
@@ -87,6 +88,7 @@ export function newProfile(name: string): Profile {
     fail_policy: 'block',
     dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
     udp: { enabled: true, block_quic: false },
+    icmp: { block_all_ping: false },
     groups: [],
     exclude: [],
   }

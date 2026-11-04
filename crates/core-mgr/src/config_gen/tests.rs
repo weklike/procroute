@@ -39,6 +39,7 @@ fn profile(groups: Vec<Group>) -> Profile {
         fail_policy: FailPolicy::Block,
         dns: DnsSettings::default(),
         udp: UdpSettings::default(),
+        icmp: Default::default(),
         groups,
         exclude: vec![m(MatchType::Name, "updater.exe", false)],
     }

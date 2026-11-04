@@ -14,6 +14,7 @@ export const PROFILES: Profile[] = [
     fail_policy: 'block',
     dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
     udp: { enabled: true, block_quic: false },
+    icmp: { block_all_ping: false },
     groups: [
       {
         tag: 'game',
@@ -47,6 +48,7 @@ export const PROFILES: Profile[] = [
     fail_policy: 'block',
     dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
     udp: { enabled: true, block_quic: true },
+    icmp: { block_all_ping: false },
     groups: [
       {
         tag: 'browser',
@@ -65,6 +67,7 @@ export const PROFILES: Profile[] = [
     fail_policy: 'block',
     dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
     udp: { enabled: true, block_quic: false },
+    icmp: { block_all_ping: false },
     groups: [
       {
         tag: 'editor',

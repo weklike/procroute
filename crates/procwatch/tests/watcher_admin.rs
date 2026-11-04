@@ -41,6 +41,7 @@ fn etw_events_drive_inheritance_within_a_second() {
         fail_policy: FailPolicy::Block,
         dns: DnsSettings::default(),
         udp: UdpSettings::default(),
+        icmp: Default::default(),
         groups: vec![Group {
             tag: "g".into(),
             outbound: "o".into(),

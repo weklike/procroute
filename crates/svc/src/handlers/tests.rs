@@ -33,6 +33,7 @@ use crate::ipc_server::{Caller, ServerConfig, serve};
 use crate::kernel::{RunningKernel, StateCallback};
 use crate::node_store::NodeStore;
 use crate::precise::BackendFactory;
+use crate::protocol_filters::{ProtocolGuard, ProtocolHandle};
 use crate::store::tests::sample;
 
 /// 假内核：记录收到的配置与控制 API 地址，留下状态回调供测试模拟守护的上报。
@@ -132,6 +133,45 @@ impl GuardHandle for FakeGuardHandle {
     }
 }
 
+/// 假的协议过滤器：记下打开时要不要挡 ping、挡过哪些目标、关过几次。`fail` 时打不开。
+#[derive(Default)]
+struct FakeProtocols {
+    fail: bool,
+    opened: Mutex<Vec<bool>>,
+    targets: Arc<Mutex<Vec<String>>>,
+    closed: Arc<AtomicUsize>,
+}
+
+impl ProtocolGuard for FakeProtocols {
+    fn open(&self, block_all_ping: bool) -> Result<Box<dyn ProtocolHandle>, String> {
+        if self.fail {
+            return Err("no WFP here".into());
+        }
+        self.opened.lock().expect("opened").push(block_all_ping);
+        Ok(Box::new(FakeProtocolHandle {
+            targets: self.targets.clone(),
+            closed: self.closed.clone(),
+        }))
+    }
+}
+
+struct FakeProtocolHandle {
+    targets: Arc<Mutex<Vec<String>>>,
+    closed: Arc<AtomicUsize>,
+}
+
+impl ProtocolHandle for FakeProtocolHandle {
+    fn block_target(&mut self, path: &str) {
+        self.targets.lock().expect("targets").push(path.to_owned());
+    }
+}
+
+impl Drop for FakeProtocolHandle {
+    fn drop(&mut self) {
+        self.closed.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 /// 假的拦截后端工厂：交出拦截层的假后端（开发机上不加载驱动，C-TEST-04），记下中继地址；
 /// `fail` 时交出一个启动即失败的后端。
 #[derive(Default)]
@@ -203,6 +243,7 @@ struct Fixture {
     services: Services,
     launcher: Arc<FakeLauncher>,
     guard: Arc<FakeGuard>,
+    protocols: Arc<FakeProtocols>,
     backends: Arc<FakeBackends>,
     dir: PathBuf,
     caller: Caller,
@@ -223,28 +264,59 @@ fn fixture_with(tag: &str, launcher: FakeLauncher) -> Fixture {
 }
 
 fn fixture_with_guard(tag: &str, launcher: FakeLauncher, guard: FakeGuard) -> Fixture {
-    fixture_full(tag, launcher, guard, FakeBackends::default())
+    fixture_full(
+        tag,
+        launcher,
+        guard,
+        FakeProtocols::default(),
+        FakeBackends::default(),
+    )
 }
 
 fn fixture_with_backends(tag: &str, backends: FakeBackends) -> Fixture {
-    fixture_full(tag, FakeLauncher::default(), FakeGuard::default(), backends)
+    fixture_full(
+        tag,
+        FakeLauncher::default(),
+        FakeGuard::default(),
+        FakeProtocols::default(),
+        backends,
+    )
+}
+
+fn fixture_with_protocols(tag: &str, protocols: FakeProtocols) -> Fixture {
+    fixture_full(
+        tag,
+        FakeLauncher::default(),
+        FakeGuard::default(),
+        protocols,
+        FakeBackends::default(),
+    )
 }
 
 fn fixture_full(
     tag: &str,
     launcher: FakeLauncher,
     guard: FakeGuard,
+    protocols: FakeProtocols,
     backends: FakeBackends,
 ) -> Fixture {
     let dir = std::env::temp_dir().join(format!("procroute-handlers-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let launcher = Arc::new(launcher);
     let guard = Arc::new(guard);
+    let protocols = Arc::new(protocols);
     let backends = Arc::new(backends);
     Fixture {
-        services: services_with(&dir, launcher.clone(), guard.clone(), backends.clone()),
+        services: services_with(
+            &dir,
+            launcher.clone(),
+            guard.clone(),
+            protocols.clone(),
+            backends.clone(),
+        ),
         launcher,
         guard,
+        protocols,
         backends,
         dir,
         caller: Caller {
@@ -262,6 +334,7 @@ fn services(dir: &std::path::Path) -> Services {
         dir,
         Arc::new(FakeLauncher::default()),
         Arc::new(FakeGuard::default()),
+        Arc::new(FakeProtocols::default()),
         Arc::new(FakeBackends::default()),
     )
 }
@@ -270,15 +343,19 @@ fn services_with(
     dir: &std::path::Path,
     launcher: Arc<FakeLauncher>,
     guard: Arc<FakeGuard>,
+    protocols: Arc<FakeProtocols>,
     backends: Arc<FakeBackends>,
 ) -> Services {
     Services::new(
         ProfileStore::open(dir).expect("store"),
         NodeStore::open(dir.join("node-store").join("nodes.json")).expect("node store"),
         tokio::sync::broadcast::channel(16).0,
-        launcher,
-        guard,
-        backends,
+        SessionComponents {
+            launcher,
+            guard,
+            protocols,
+            backend: backends,
+        },
         vec![
             r"C:\Program Files\ProcRoute\procroute-svc.exe".into(),
             r"C:\Program Files\ProcRoute\procroute-ui.exe".into(),

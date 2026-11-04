@@ -127,7 +127,8 @@ impl Targets {
         self.known.read().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn is_self(&self, path: &str) -> bool {
+    /// 是不是 ProcRoute 自身的可执行文件。
+    pub fn is_self(&self, path: &str) -> bool {
         let path = normalize_path(path);
         self.self_paths.contains(&path)
     }

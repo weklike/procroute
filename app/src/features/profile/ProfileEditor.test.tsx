@@ -25,6 +25,7 @@ const PROFILE: Profile = {
   fail_policy: 'block',
   dns: { strategy: 'sniff', hijack_port53: true, remote_server: null },
   udp: { enabled: true, block_quic: false },
+  icmp: { block_all_ping: false },
   groups: [
     {
       tag: 'game',

@@ -22,6 +22,7 @@ fn engine(name: &str, include_children: bool) -> RuleEngine {
         fail_policy: FailPolicy::Block,
         dns: DnsSettings::default(),
         udp: UdpSettings::default(),
+        icmp: Default::default(),
         groups: vec![Group {
             tag: "g".into(),
             outbound: "o".into(),

@@ -23,6 +23,7 @@ use crate::ipc_server::{Call, Handler};
 use crate::kernel::KernelLauncher;
 use crate::node_store::NodeStore;
 use crate::precise::BackendFactory;
+use crate::protocol_filters::ProtocolGuard;
 use crate::store::{ProfileStore, StoreError};
 
 mod diag;
@@ -42,6 +43,7 @@ pub struct Services {
     launcher: Arc<dyn KernelLauncher>,
     /// TUN 模式 `block` 策略的阻断（C-NET-03）。
     guard: Arc<dyn FailClosedGuard>,
+    protocols: Arc<dyn ProtocolGuard>,
     /// 精确模式的拦截后端。
     backend: Arc<dyn BackendFactory>,
     /// 运行中的内核。启动与停止都持有这把锁，彼此互斥。
@@ -54,23 +56,36 @@ pub struct Services {
     diag: DiagSources,
 }
 
+/// 会话用到的、测试里要换成假实现的组件（开发机上不起内核、不装过滤器、不加载驱动，C-TEST-04）。
+pub struct SessionComponents {
+    pub launcher: Arc<dyn KernelLauncher>,
+    pub guard: Arc<dyn FailClosedGuard>,
+    pub protocols: Arc<dyn ProtocolGuard>,
+    pub backend: Arc<dyn BackendFactory>,
+}
+
 impl Services {
     /// `stream` 是日志与连接事件的发送端：日志层在服务状态之前创建，两者共用。
     pub fn new(
         profiles: ProfileStore,
         nodes: NodeStore,
         stream: broadcast::Sender<StreamEvent>,
-        launcher: Arc<dyn KernelLauncher>,
-        guard: Arc<dyn FailClosedGuard>,
-        backend: Arc<dyn BackendFactory>,
+        components: SessionComponents,
         self_exe_paths: Vec<String>,
     ) -> Self {
+        let SessionComponents {
+            launcher,
+            guard,
+            protocols,
+            backend,
+        } = components;
         Self {
             profiles,
             nodes,
             hub: Arc::new(EventHub::with_stream(session::initial_status(), stream)),
             launcher,
             guard,
+            protocols,
             backend,
             kernel: Mutex::new(None),
             epoch: Arc::new(AtomicU64::new(0)),

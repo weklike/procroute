@@ -12,6 +12,9 @@
 //!   最后启动拦截后端。内核不在时中继对新连接回 RST，不直连（C-NET-03）。`allow` 策略下内核放弃重启时
 //!   同时撤下拦截，目标进程回到直连，与会话「已结束」的状态一致。拦截后端起不来返回 `driver.not_loaded`。
 //!   TCP 经回环中继，UDP（含 53 端口）经 UDP 中继，都转给 sing-box 的本地 SOCKS 入口。
+//!
+//! 两种模式都先打开拦截层管不到的协议的过滤器（见 [`crate::protocol_filters`]），会话结束时最后撤销；
+//! 装不上就拒绝启动（`session.fail_closed_unsupported`）。
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -27,6 +30,7 @@ use procroute_core_mgr::supervisor::{KernelState, StopReason};
 use procroute_intercept::divert::socket::{ProcessResolver, SystemProcesses};
 use procroute_intercept::{ExclusionSet, InterceptSettings, Interceptor, StartContext};
 use procroute_platform_win::secret::Secret;
+use procroute_procwatch::Change;
 use procroute_procwatch::watcher::{Options, Watcher};
 use procroute_proto::Empty;
 use procroute_proto::error::{ErrorCode, IpcError};
@@ -46,6 +50,7 @@ use crate::kernel::{RunningKernel, StateCallback};
 use crate::precise::{
     GroupLabels, NatMap, RelaySet, Targets, UdpBridge, new_nat, resolve_servers, spawn_conn_events,
 };
+use crate::protocol_filters::{Plan, ProtocolHandle, target_path_rules};
 
 /// 后端的流事件通道容量。满了丢事件并计数（拦截层不阻塞收包线程，C-CODE-05）。
 const FLOW_EVENT_QUEUE: usize = 4096;
@@ -55,12 +60,17 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 /// 精确模式的拦截后端。内核放弃重启时的回调（`allow` 策略）也要能撤下它，所以与会话共用。
 type SharedBackend = Arc<std::sync::Mutex<Option<Box<dyn Interceptor>>>>;
 
+/// 拦截层管不到的协议的过滤器。进程追踪的回调要往里加目标，内核放弃重启时的回调（`allow` 策略）要能撤下它，
+/// 所以与会话共用。没有要装的过滤器时是 `None`。
+type SharedProtocols = Arc<std::sync::Mutex<Option<Box<dyn ProtocolHandle>>>>;
+
 /// 运行中的会话：内核、TUN 模式下读取内核连接列表的轮询（连接面板）与 `block` 策略的阻断，
 /// 或精确模式的各个组件。
 pub(super) struct RunningSession {
     kernel: Box<dyn RunningKernel>,
     conn_watch: Option<ConnWatch>,
     guard: Option<Box<dyn GuardHandle>>,
+    protocols: SharedProtocols,
     precise: Option<PreciseRun>,
 }
 
@@ -105,9 +115,17 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
     }
     let store = svc.profiles.clone();
     let profile = blocking(move || store.get(&profile_id).map_err(store_error)).await?;
-    let running = match profile.mode {
-        Mode::Tun => start_tun(svc, &profile).await?,
-        Mode::Precise => start_precise(svc, &profile).await?,
+    let protocols = open_protocol_filters(svc, &profile).await?;
+    let started = match profile.mode {
+        Mode::Tun => start_tun(svc, &profile, &protocols).await,
+        Mode::Precise => start_precise(svc, &profile, &protocols).await,
+    };
+    let running = match started {
+        Ok(running) => running,
+        Err(e) => {
+            close_protocol_filters(protocols).await;
+            return Err(e);
+        }
     };
     let precise = running.precise.is_some();
     *slot = Some(running);
@@ -123,7 +141,11 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
     to_json(status)
 }
 
-async fn start_tun(svc: &Services, profile: &Profile) -> Result<RunningSession, IpcError> {
+async fn start_tun(
+    svc: &Services,
+    profile: &Profile,
+    protocols: &SharedProtocols,
+) -> Result<RunningSession, IpcError> {
     let config = tun_config(svc, profile).await?;
     // 先装阻断再启动内核：从第一个包起就不会直连
     let guard = match profile.fail_policy {
@@ -137,7 +159,7 @@ async fn start_tun(svc: &Services, profile: &Profile) -> Result<RunningSession, 
         svc.epoch.clone(),
         epoch,
         profile.fail_policy,
-        None,
+        on_give_up(profile.fail_policy, None, protocols),
     );
     let api = SocketAddr::from((Ipv4Addr::LOCALHOST, config.api_port));
     let kernel = match launch_kernel(svc, config.text, api, on_state).await {
@@ -165,11 +187,16 @@ async fn start_tun(svc: &Services, profile: &Profile) -> Result<RunningSession, 
         kernel,
         conn_watch,
         guard,
+        protocols: Arc::clone(protocols),
         precise: None,
     })
 }
 
-async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSession, IpcError> {
+async fn start_precise(
+    svc: &Services,
+    profile: &Profile,
+    protocols: &SharedProtocols,
+) -> Result<RunningSession, IpcError> {
     let config = precise_config(svc, profile).await?;
     let engine = |p: &Profile| {
         RuleEngine::compile(p)
@@ -178,14 +205,28 @@ async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSessi
     let inherit = profile.groups.iter().map(|g| g.include_children).collect();
     let targets = Arc::new(Targets::new(engine(profile)?, inherit, &config.self_paths));
     let watch_engine = engine(profile)?;
+    let block_targets = Plan::for_profile(profile).block_targets;
+    if block_targets {
+        // 完整路径规则现在就装好：这些进程启动时不用等进程追踪
+        let paths = target_path_rules(profile, &engine(profile)?);
+        block_target_paths(protocols, &targets, paths).await;
+    }
     let epoch = svc.epoch.fetch_add(1, Ordering::SeqCst) + 1;
     svc.hub.update_session(|s| *s = starting(profile));
 
     // 1. 进程追踪：第一次快照在返回前完成，已运行的目标进程从一开始就在集合里
     let watch_targets = Arc::clone(&targets);
+    let watch_protocols = Arc::clone(protocols);
     let watcher = tokio::task::spawn_blocking(move || {
         Watcher::start(watch_engine, Options::default(), move |changes| {
             watch_targets.apply(changes);
+            if block_targets {
+                let paths = changes.iter().filter_map(|c| match c {
+                    Change::Targeted { path, .. } => path.clone(),
+                    Change::Released { .. } => None,
+                });
+                block_paths(&watch_protocols, &watch_targets, paths);
+            }
         })
     })
     .await;
@@ -209,19 +250,12 @@ async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSessi
 
     // 2. 内核：`allow` 策略下放弃重启时撤下拦截
     let backend: SharedBackend = Arc::default();
-    let give_up: Option<Arc<dyn Fn() + Send + Sync>> = match profile.fail_policy {
-        FailPolicy::Allow => {
-            let backend = Arc::clone(&backend);
-            Some(Arc::new(move || stop_backend(&backend)))
-        }
-        FailPolicy::Block => None,
-    };
     let on_state = state_callback(
         svc.hub.clone(),
         svc.epoch.clone(),
         epoch,
         profile.fail_policy,
-        give_up,
+        on_give_up(profile.fail_policy, Some(Arc::clone(&backend)), protocols),
     );
     let api = SocketAddr::from((Ipv4Addr::LOCALHOST, config.api_port));
     let kernel = match launch_kernel(svc, config.text, api, on_state).await {
@@ -310,6 +344,7 @@ async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSessi
         kernel,
         conn_watch: None,
         guard: None,
+        protocols: Arc::clone(protocols),
         precise: Some(PreciseRun {
             backend,
             relays,
@@ -318,6 +353,27 @@ async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSessi
             events,
         }),
     })
+}
+
+/// 内核放弃重启时要做的事。`allow` 策略下会话就此结束：撤下拦截后端（目标进程回到直连）与协议过滤器，否则
+/// 会话结束了 ping 还被挡着。`block` 策略保持原样，会话进入 `blocked`（C-NET-03）。
+fn on_give_up(
+    policy: FailPolicy,
+    backend: Option<SharedBackend>,
+    protocols: &SharedProtocols,
+) -> Option<Arc<dyn Fn() + Send + Sync>> {
+    match policy {
+        FailPolicy::Block => None,
+        FailPolicy::Allow => {
+            let protocols = Arc::clone(protocols);
+            Some(Arc::new(move || {
+                if let Some(backend) = &backend {
+                    stop_backend(backend);
+                }
+                drop(take_protocols(&protocols));
+            }))
+        }
+    }
 }
 
 /// 启动中途失败：作废这次启动的回调，会话回到初始状态，返回错误。
@@ -408,6 +464,7 @@ pub(super) async fn shutdown(svc: &Services) {
 /// 精确模式先撤下拦截（目标进程回到直连）再停中继与追踪；然后停连接轮询（为剩余连接发「已关闭」）、
 /// 停内核，最后撤销阻断。
 async fn stop_session(running: RunningSession) {
+    let protocols = running.protocols;
     if let Some(p) = running.precise {
         let backend = p.backend;
         let _ = tokio::task::spawn_blocking(move || stop_backend(&backend)).await;
@@ -423,6 +480,7 @@ async fn stop_session(running: RunningSession) {
     }
     stop_kernel(running.kernel).await;
     stop_guard(running.guard).await;
+    close_protocol_filters(protocols).await;
 }
 
 /// 撤下拦截后端（撤销全部过滤器）。阻塞调用。
@@ -477,6 +535,69 @@ async fn install_guard(
             format!("fail-closed installer failed: {e}"),
         )),
     }
+}
+
+/// 按方案打开协议过滤器。不需要时什么也不做；需要却打不开就不启动会话。
+async fn open_protocol_filters(
+    svc: &Services,
+    profile: &Profile,
+) -> Result<SharedProtocols, IpcError> {
+    let plan = Plan::for_profile(profile);
+    if plan.is_empty() {
+        return Ok(Arc::default());
+    }
+    let guard = svc.protocols.clone();
+    match tokio::task::spawn_blocking(move || guard.open(plan.block_all_ping)).await {
+        Ok(Ok(handle)) => Ok(Arc::new(std::sync::Mutex::new(Some(handle)))),
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "cannot install the protocol filters");
+            Err(IpcError::new(
+                ErrorCode::SessionFailClosedUnsupported,
+                format!("cannot install the protocol filters: {e}"),
+            ))
+        }
+        Err(e) => Err(IpcError::new(
+            ErrorCode::Internal,
+            format!("protocol filter installer failed: {e}"),
+        )),
+    }
+}
+
+/// 挡住这些目标可执行文件的其他协议，ProcRoute 自身除外。阻塞调用。
+fn block_paths(
+    protocols: &SharedProtocols,
+    targets: &Targets,
+    paths: impl IntoIterator<Item = String>,
+) {
+    let mut open = protocols.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(open) = open.as_mut() {
+        for path in paths {
+            if !targets.is_self(&path) {
+                open.block_target(&path);
+            }
+        }
+    }
+}
+
+async fn block_target_paths(
+    protocols: &SharedProtocols,
+    targets: &Arc<Targets>,
+    paths: Vec<String>,
+) {
+    let (protocols, targets) = (Arc::clone(protocols), Arc::clone(targets));
+    let _ = tokio::task::spawn_blocking(move || block_paths(&protocols, &targets, paths)).await;
+}
+
+fn take_protocols(protocols: &SharedProtocols) -> Option<Box<dyn ProtocolHandle>> {
+    protocols
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+}
+
+/// 撤销协议过滤器。
+async fn close_protocol_filters(protocols: SharedProtocols) {
+    let _ = tokio::task::spawn_blocking(move || drop(take_protocols(&protocols))).await;
 }
 
 async fn stop_guard(guard: Option<Box<dyn GuardHandle>>) {
