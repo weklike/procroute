@@ -15,7 +15,7 @@
 //! - `dir_acl`：配置目录的受保护 DACL 与所有者检查（T-058，C-SEC-05，仅 Windows）；
 //! - `process`：管道客户端 PID、进程映像路径与用户 SID、创建时间（T-057、T-079，仅 Windows）；
 //! - `etw`：`Microsoft-Windows-Kernel-Process` 的进程启动 / 退出实时事件（T-079，仅 Windows）；
-//! - `authenticode`：内嵌签名校验与签名主体（T-057，仅 Windows）；
+//! - `authenticode`：内嵌签名校验与签名证书（T-057、ADR 0002，仅 Windows）；
 //! - `service`：服务控制分派器与状态上报（T-057，仅 Windows）；
 //! - `hash`：SHA-256，按锁文件校验第三方二进制（C-DEP-04、C-SEC-06，仅 Windows）；
 //! - `http`：WinHTTP 的 GET，拉取订阅（C-SEC-07，仅 Windows）；

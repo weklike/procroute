@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use procroute_platform_win::authenticode::SignerCert;
 use procroute_proto::Empty;
 use procroute_proto::event::{ConnEvent, ConnPhase, LogEvent, Network};
 use procroute_proto::session::{SessionStartParams, SessionState, SessionStatus};
@@ -294,7 +295,7 @@ async fn unauthorized_clients_are_rejected_before_any_request() {
     // 正式策略、安装目录不包含测试二进制：必须拒绝。
     let h = start(ClientAuth::Enforce {
         install_dir: r"c:\program files\procroute".into(),
-        signer: Ok("C=CN, O=ProcRoute, CN=ProcRoute".into()),
+        signer: Ok(SignerCert::from_sha256([1; 32])),
     });
     let mut c = Client::connect(&h.name).await;
     let resp = c.recv().await.expect("an error response");
