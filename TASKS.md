@@ -46,7 +46,7 @@
 | M1 | T-050 ~ T-058、T-060 ~ T-062；TUN + `block` 的 WFP 阻断已在沙盒中验证；收窄令牌后 ETW 可用（沙盒，见下） | 收窄令牌后 wintun 能否创建：在 `cargo xtask sandbox-dev` 里启动一次 TUN 会话确认 |
 | M2 | T-070 ~ T-076、T-078、T-079（精确模式端到端已在沙盒中通过，见下）；T-077 的排除与撤销部分 | T-080 泄漏检测器；T-077 剩下的「代理地址变化 1 秒内更新排除表」（会话中改节点时） |
 | M3 | T-090 ~ T-097（UDP 中继、QUIC 阻断、子进程继承、多出站分组均已接线，见下） | IPv4 / IPv6 分片的重组（T-091 的后半，见下的已知缺口） |
-| M4 | T-112、T-113（外壳与界面部分，见下） | T-110 打包（服务注册、签名，需要先确认签名与发布流程，AGENTS 第 8 节第 4 条） |
+| M4 | T-110（本机自签名证书的安装器，安装 / 卸载已在沙盒中验证，见下）、T-112、T-113（外壳与界面部分，见下） | 在本机安装试用（用户自己装）；T-111 自动更新（需要独立的更新签名密钥，AGENTS 第 8 节第 4 条） |
 
 偏离原计划的地方：
 
@@ -169,6 +169,22 @@
   - 组播、广播地址与回环、链路本地一样永远排除（局域网发现协议没有理由进代理）。
   - **已知缺口**：IPv4 分片与带扩展头的 IPv6 包读不出端口，目前原样放回（无法判断是不是目标）；分片的目标 UDP
     会绕过代理。需要分片重组（T-091 的后半）后才能按 C-NET-07 处理。
+- T-110（2026-11-04 定用本机自签名证书，只在这台机器上用；安装由用户自己做）：`cargo xtask bundle`。
+  - 证书：当前用户证书库里主题为 `CN=ProcRoute Local Code Signing` 的代码签名证书，没有就新建（私钥不可导出，
+    5 年）；公钥导出到 `target/bundle/procroute-local-signing.cer`。安装器不改证书信任：第一次安装前由用户以管理员
+    身份运行 `target/bundle/trust-signing-cert.ps1`（加入本机「受信任的根」）。服务以 LocalSystem 校验自己与界面
+    的签名主体（C-SEC-02），不受信任时拒绝所有界面。
+  - 构建：服务与界面都是静态 CRT 的 release 构建（安装的机器上不需要 VC++ 运行库）；服务不含
+    `insecure-skip-client-auth`。Tauri NSIS 打包，`perMachine`，WebView2 用下载引导程序（本机已有运行时则跳过）。
+  - 签名：打包器在自定义签名命令下仍用 signtool 判断「是否已签名」，本机没有 Windows SDK，`TAURI_WINDOWS_SIGNTOOL_PATH`
+    指向 `xtask/bundle/signtool-verify.cmd`（一律回答未签名）；签名策略全在 `xtask/bundle/sign.ps1`：锁定的第三方
+    二进制（sing-box、WinDivert）跳过，否则签名会改变它们的 SHA-256、服务拒绝加载（C-DEP-04、C-DRV-01），其余
+    （服务、界面、NSIS 插件、卸载器、安装器）用同一张证书签名。
+  - 安装器钩子 `app/src-tauri/windows/hooks.nsh`：登记服务 ProcRoute（LocalSystem、自动启动、异常退出 5 秒后重启），
+    升级前与卸载前 `net stop`，卸载时删除服务登记与界面的开机自启项；`%ProgramData%\ProcRoute`（方案、节点、日志）保留。
+  - 验证：`cargo xtask sandbox-install` 在沙盒里信任证书 → 静默安装 → 检查文件、签名、服务、控制管道 → 启动界面并
+    从服务的调试日志确认签过名的界面被接受 → 静默卸载 → 检查服务、文件、进程、WinDivert、防火墙规则、开机自启项
+    没有残留。2026-11-04 全部 21 项通过。卸载检查没有覆盖「加载过驱动之后」的情形（这一步需要会话，只有界面能发起）。
 - 桌面客户端（`app/src-tauri`，包名 `procroute-ui`）：只依赖 proto；一条长连接、断线每 2 秒重连并重放订阅。
   外壳自己的事件 `shell:connection`（与服务的连接变化，界面据此清空服务端数据，C-UI-02）与 `shell:tray`（托盘点击）
   不属于 IPC 协议，类型写在 `app/src/api/shell.ts`。托盘菜单由前端生成并下发（文案走 i18n，C-UI-04），外壳只处理
