@@ -5,7 +5,8 @@
 //! 这样假后端上的测试与真实后端的行为一致。真正的代理工作不在这里：改道后的流
 //! 交给本地中继，中继与本 crate 只通过 svc 组装的 trait 与消息交互（C-ARCH-02）。
 //!
-//! 跨平台部分与假后端之外，WinDivert 后端在 [`divert`]（T-071 起，仅 Windows）。
+//! 跨平台部分（判定、排除表、数据包解析与改写 [`packet`]）与假后端之外，WinDivert 后端在
+//! [`divert`]（T-071 起，仅 Windows）。
 //! `unsafe` 只允许出现在 `*::ffi` 子模块（C-CODE-01）。
 
 pub mod backend;
@@ -13,6 +14,7 @@ pub mod backend;
 pub mod divert;
 pub mod exclude;
 pub mod flow;
+pub mod packet;
 
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;

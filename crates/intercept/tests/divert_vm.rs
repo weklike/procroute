@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use procroute_intercept::divert::ffi::{Address, Layer, Param, Shutdown, WinDivert, event, flags};
 use procroute_intercept::divert::socket::{
-    Attributor, FlowTable, ProcessResolver, SocketMonitor, SystemProcesses, TargetAction,
+    Attributor, FlowAction, FlowTable, ProcessResolver, SocketMonitor, SystemProcesses,
 };
 use procroute_intercept::{Counters, ExclusionSet, FlowPolicy, InterceptSettings, ProcessKey};
 use procroute_proto::event::Network;
@@ -118,7 +118,7 @@ fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
 }
 
 #[test]
-fn socket_monitor_registers_only_target_connects() {
+fn socket_monitor_redirects_only_target_connects() {
     let wd = load();
     let me = SystemProcesses
         .resolve(std::process::id())
@@ -160,13 +160,14 @@ fn socket_monitor_registers_only_target_connects() {
         || find(target_remote).is_some(),
     );
     let flow = find(target_remote).expect("registered");
-    assert_eq!(flow.process, me);
-    assert_eq!(flow.action, TargetAction::Redirect { group: 3 });
+    assert_eq!(flow.process, Some(me));
+    assert_eq!(flow.pid, me.pid);
+    assert_eq!(flow.action, FlowAction::Redirect { group: 3 });
     assert_eq!(flow.key.network, Network::Tcp);
     assert_ne!(flow.key.local.port(), 0, "{flow:?}");
     assert!(!flow.key.local.ip().is_loopback(), "{flow:?}");
 
-    // 非目标进程（子进程）：事件被看到、被判定，但不登记（C-NET-02）
+    // 非目标进程（子进程）：事件被看到、被判定，只登记为放行（C-NET-02）
     let other_remote = SocketAddr::from((TEST_NET, 10));
     let mut child = Command::new(std::env::current_exe().expect("test executable"))
         .args(["--exact", "child_connect_helper", "--test-threads=1"])
@@ -187,9 +188,13 @@ fn socket_monitor_registers_only_target_connects() {
                 .any(|p| p.pid == child_pid)
         },
     );
-    assert!(find(other_remote).is_none(), "{:?}", table.entries());
+    // 子进程的 CONNECT 可能已经随它的 CLOSE 被撤销；在的话只能是放行
     assert!(
-        table.entries().iter().all(|f| f.process.pid != child_pid),
+        table
+            .entries()
+            .iter()
+            .filter(|f| f.pid == child_pid || f.key.remote == other_remote)
+            .all(|f| f.action == FlowAction::Bypass),
         "{:?}",
         table.entries()
     );

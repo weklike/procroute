@@ -1,30 +1,40 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `session.*`：按方案启停改道（T-058）。
+//! `session.*`：按方案启停改道（T-058、T-078）。
 //!
-//! 目前只有 TUN 模式能真正启动：服务生成配置，经 [`KernelLauncher`] 启动 sing-box，
-//! 守护进程的状态变化实时写回会话状态并推给界面（C-UI-02）。
+//! 服务生成配置，经 [`KernelLauncher`] 启动 sing-box，守护进程的状态变化实时写回会话状态并推给界面
+//! （C-UI-02）。两种模式：
 //!
-//! TUN 模式 + `fail_policy = block`：sing-box 一退出，TUN 与路由随之撤销。启动内核之前先经
-//! [`FailClosedGuard`] 装好阻断（服务持有的动态 WFP 过滤器），内核不在时目标进程的连接被拒绝而不是直连
-//! （C-NET-03）；装不上就拒绝启动（`session.fail_closed_unsupported`），不在没有保护的情况下运行。
-//! 阻断在会话停止、内核停下之后才撤销。
-//!
-//! 如实拒绝、不假装成功的情形：精确进程模式（拦截后端 T-072 起尚未接入）返回 `driver.not_loaded`。
+//! - TUN 模式：sing-box 的 TUN 入站按进程规则分流。`fail_policy = block` 时 sing-box 一退出，TUN 与路由
+//!   随之撤销；启动内核之前先经 [`FailClosedGuard`] 装好阻断（服务持有的动态 WFP 过滤器），内核不在时
+//!   目标进程的连接被拒绝而不是直连（C-NET-03）；装不上就拒绝启动（`session.fail_closed_unsupported`）。
+//!   阻断在会话停止、内核停下之后才撤销。
+//! - 精确进程模式（见 [`crate::precise`]）：进程追踪 → 目标集合，sing-box 的本地 SOCKS 入口，回环中继，
+//!   最后启动拦截后端。内核不在时中继对新连接回 RST，不直连（C-NET-03）。`allow` 策略下内核放弃重启时
+//!   同时撤下拦截，目标进程回到直连，与会话「已结束」的状态一致。拦截后端起不来返回 `driver.not_loaded`。
+//!   TCP 经回环中继，UDP（含 53 端口）经 UDP 中继，都转给 sing-box 的本地 SOCKS 入口。
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError};
+use std::time::Duration;
 
-use procroute_core_mgr::config_gen::{GenError, NodeOutbound, Runtime, generate_tun};
+use procroute_core_mgr::config_gen::{
+    GenError, NodeOutbound, Runtime, SocksInbound, generate_precise, generate_tun,
+};
 use procroute_core_mgr::runtime::{free_loopback_port, random_api_secret};
 use procroute_core_mgr::supervisor::{KernelState, StopReason};
+use procroute_intercept::divert::socket::{ProcessResolver, SystemProcesses};
+use procroute_intercept::{ExclusionSet, InterceptSettings, Interceptor, StartContext};
+use procroute_platform_win::secret::Secret;
+use procroute_procwatch::watcher::{Options, Watcher};
 use procroute_proto::Empty;
 use procroute_proto::error::{ErrorCode, IpcError};
 use procroute_proto::profile::{FailPolicy, Mode, Profile};
 use procroute_proto::session::{
     BlockedReason, ComponentState, ComponentStatus, SessionStartParams, SessionState, SessionStatus,
 };
+use procroute_rules::engine::RuleEngine;
 use serde_json::Value;
 
 use super::{Services, blocking, node, store_error, to_json};
@@ -33,12 +43,34 @@ use crate::events::EventHub;
 use crate::fail_closed::{FailClosedGuard, GuardHandle};
 use crate::ipc_server::parse_params;
 use crate::kernel::{RunningKernel, StateCallback};
+use crate::precise::{
+    GroupLabels, NatMap, RelaySet, Targets, UdpBridge, new_nat, resolve_servers, spawn_conn_events,
+};
 
-/// 运行中的会话：内核、TUN 模式下读取内核连接列表的轮询（连接面板），以及 `block` 策略的阻断。
+/// 后端的流事件通道容量。满了丢事件并计数（拦截层不阻塞收包线程，C-CODE-05）。
+const FLOW_EVENT_QUEUE: usize = 4096;
+/// 解析节点服务器地址（写进排除表）最多等这么久。
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 精确模式的拦截后端。内核放弃重启时的回调（`allow` 策略）也要能撤下它，所以与会话共用。
+type SharedBackend = Arc<std::sync::Mutex<Option<Box<dyn Interceptor>>>>;
+
+/// 运行中的会话：内核、TUN 模式下读取内核连接列表的轮询（连接面板）与 `block` 策略的阻断，
+/// 或精确模式的各个组件。
 pub(super) struct RunningSession {
     kernel: Box<dyn RunningKernel>,
     conn_watch: Option<ConnWatch>,
     guard: Option<Box<dyn GuardHandle>>,
+    precise: Option<PreciseRun>,
+}
+
+/// 精确模式会话的组件。
+struct PreciseRun {
+    backend: SharedBackend,
+    relays: RelaySet,
+    udp: Arc<UdpBridge>,
+    watcher: Watcher,
+    events: Option<std::thread::JoinHandle<()>>,
 }
 
 /// 服务刚启动时的状态：服务在运行，驱动与内核未启动（C-UI-02 要求如实显示）。
@@ -73,57 +105,241 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
     }
     let store = svc.profiles.clone();
     let profile = blocking(move || store.get(&profile_id).map_err(store_error)).await?;
-    check_supported(&profile)?;
-    let config = tun_config(svc, &profile).await?;
+    let running = match profile.mode {
+        Mode::Tun => start_tun(svc, &profile).await?,
+        Mode::Precise => start_precise(svc, &profile).await?,
+    };
+    let precise = running.precise.is_some();
+    *slot = Some(running);
+    let status = svc.hub.update_session(|s| {
+        s.state = SessionState::Running;
+        s.components.kernel = ComponentState::Active;
+        if precise {
+            s.components.driver = ComponentState::Active;
+        }
+    });
+    let mode = if precise { "precise" } else { "tun" };
+    tracing::info!(profile = %profile.id, mode, "session started");
+    to_json(status)
+}
+
+async fn start_tun(svc: &Services, profile: &Profile) -> Result<RunningSession, IpcError> {
+    let config = tun_config(svc, profile).await?;
     // 先装阻断再启动内核：从第一个包起就不会直连
     let guard = match profile.fail_policy {
-        FailPolicy::Block => Some(install_guard(svc.guard.clone(), &profile).await?),
+        FailPolicy::Block => Some(install_guard(svc.guard.clone(), profile).await?),
         FailPolicy::Allow => None,
     };
-
     let epoch = svc.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-    svc.hub.update_session(|s| *s = starting(&profile));
+    svc.hub.update_session(|s| *s = starting(profile));
     let on_state = state_callback(
         svc.hub.clone(),
         svc.epoch.clone(),
         epoch,
         profile.fail_policy,
+        None,
     );
-    let launcher = svc.launcher.clone();
     let api = SocketAddr::from((Ipv4Addr::LOCALHOST, config.api_port));
-    let text = config.text;
+    let kernel = match launch_kernel(svc, config.text, api, on_state).await {
+        Ok(kernel) => kernel,
+        Err(e) => {
+            stop_guard(guard).await;
+            return Err(e);
+        }
+    };
+    let conn_watch = match Classifier::new(profile, config.node_names) {
+        Ok(classifier) => Some(ConnWatch::spawn(
+            svc.hub.clone(),
+            api,
+            config.api_secret,
+            classifier,
+            POLL_INTERVAL,
+        )),
+        Err(e) => {
+            // 方案已通过校验，不会走到这里；连接面板没有数据，会话照常运行
+            tracing::error!(error = %e, "cannot attribute connections");
+            None
+        }
+    };
+    Ok(RunningSession {
+        kernel,
+        conn_watch,
+        guard,
+        precise: None,
+    })
+}
+
+async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSession, IpcError> {
+    let config = precise_config(svc, profile).await?;
+    let engine = |p: &Profile| {
+        RuleEngine::compile(p)
+            .map_err(|e| IpcError::new(ErrorCode::ProfileInvalidSchema, e.to_string()))
+    };
+    let inherit = profile.groups.iter().map(|g| g.include_children).collect();
+    let targets = Arc::new(Targets::new(engine(profile)?, inherit, &config.self_paths));
+    let watch_engine = engine(profile)?;
+    let epoch = svc.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    svc.hub.update_session(|s| *s = starting(profile));
+
+    // 1. 进程追踪：第一次快照在返回前完成，已运行的目标进程从一开始就在集合里
+    let watch_targets = Arc::clone(&targets);
+    let watcher = tokio::task::spawn_blocking(move || {
+        Watcher::start(watch_engine, Options::default(), move |changes| {
+            watch_targets.apply(changes);
+        })
+    })
+    .await;
+    let watcher = match watcher {
+        Ok(Ok(w)) => w,
+        Ok(Err(e)) => {
+            return Err(abort_start(
+                svc,
+                ErrorCode::Internal,
+                format!("process tracking failed: {e}"),
+            ));
+        }
+        Err(e) => {
+            return Err(abort_start(
+                svc,
+                ErrorCode::Internal,
+                format!("process tracking failed: {e}"),
+            ));
+        }
+    };
+
+    // 2. 内核：`allow` 策略下放弃重启时撤下拦截
+    let backend: SharedBackend = Arc::default();
+    let give_up: Option<Arc<dyn Fn() + Send + Sync>> = match profile.fail_policy {
+        FailPolicy::Allow => {
+            let backend = Arc::clone(&backend);
+            Some(Arc::new(move || stop_backend(&backend)))
+        }
+        FailPolicy::Block => None,
+    };
+    let on_state = state_callback(
+        svc.hub.clone(),
+        svc.epoch.clone(),
+        epoch,
+        profile.fail_policy,
+        give_up,
+    );
+    let api = SocketAddr::from((Ipv4Addr::LOCALHOST, config.api_port));
+    let kernel = match launch_kernel(svc, config.text, api, on_state).await {
+        Ok(kernel) => kernel,
+        Err(e) => {
+            stop_watcher(watcher).await;
+            return Err(e);
+        }
+    };
+
+    // 3. 回环中继
+    let nat = new_nat(profile.fail_policy);
+    let group_tags: Arc<[String]> = profile.groups.iter().map(|g| g.tag.clone()).collect();
+    let socks = SocketAddr::from((Ipv4Addr::LOCALHOST, config.socks_port));
+    // UDP 中继（每个会话一个 SOCKS5 UDP ASSOCIATE）
+    let udp = UdpBridge::new(
+        socks,
+        config.socks_password.clone(),
+        Arc::clone(&group_tags),
+    );
+    let relays =
+        match RelaySet::start(socks, config.socks_password, group_tags, Arc::clone(&nat)).await {
+            Ok(r) => r,
+            Err(e) => {
+                stop_kernel(kernel).await;
+                stop_watcher(watcher).await;
+                return Err(abort_start(
+                    svc,
+                    ErrorCode::Internal,
+                    format!("cannot start the relay: {e}"),
+                ));
+            }
+        };
+
+    // 4. 拦截后端
+    let exclusions = exclusions(config.servers).await;
+    let (events_tx, events_rx) = std::sync::mpsc::sync_channel(FLOW_EVENT_QUEUE);
+    let ctx = StartContext {
+        settings: InterceptSettings {
+            fail_policy: profile.fail_policy,
+            udp_enabled: profile.udp.enabled,
+            block_quic: profile.udp.block_quic,
+            hijack_port53: profile.dns.hijack_port53,
+        },
+        exclusions,
+        policy: Arc::clone(&targets) as _,
+        events: events_tx,
+    };
+    let mut created = svc.backend.create(
+        relays.relays,
+        Arc::new(NatMap(nat)),
+        Some(Arc::clone(&udp) as _),
+    );
+    let started = tokio::task::spawn_blocking(move || {
+        let r = created.start(ctx);
+        (created, r)
+    })
+    .await;
+    match started {
+        Ok((b, Ok(()))) => {
+            *backend.lock().unwrap_or_else(PoisonError::into_inner) = Some(b);
+        }
+        failed => {
+            let message = match failed {
+                Ok((_, Err(e))) => e.to_string(),
+                Err(e) => e.to_string(),
+                Ok((_, Ok(()))) => String::new(),
+            };
+            relays.stop().await;
+            stop_kernel(kernel).await;
+            stop_watcher(watcher).await;
+            tracing::error!(error = %message, "the interception backend failed to start");
+            return Err(abort_start(
+                svc,
+                ErrorCode::DriverNotLoaded,
+                format!("the interception driver failed to start: {message}"),
+            ));
+        }
+    }
+
+    // 5. 连接面板
+    let events = spawn_conn_events(events_rx, svc.hub.clone(), targets, config.labels)
+        .map_err(|e| tracing::error!(error = %e, "cannot start the connection events thread"))
+        .ok();
+    Ok(RunningSession {
+        kernel,
+        conn_watch: None,
+        guard: None,
+        precise: Some(PreciseRun {
+            backend,
+            relays,
+            udp,
+            watcher,
+            events,
+        }),
+    })
+}
+
+/// 启动中途失败：作废这次启动的回调，会话回到初始状态，返回错误。
+fn abort_start(svc: &Services, code: ErrorCode, message: String) -> IpcError {
+    svc.epoch.fetch_add(1, Ordering::SeqCst);
+    svc.hub.update_session(|s| *s = initial_status());
+    IpcError::new(code, message)
+}
+
+/// 启动内核并等控制 API 就绪。失败时作废回调、复位会话状态。
+async fn launch_kernel(
+    svc: &Services,
+    text: Secret<String>,
+    api: SocketAddr,
+    on_state: StateCallback,
+) -> Result<Box<dyn RunningKernel>, IpcError> {
+    let launcher = svc.launcher.clone();
     let launched = tokio::task::spawn_blocking(move || launcher.launch(text, api, on_state)).await;
     match launched {
-        Ok(Ok(kernel)) => {
-            let conn_watch = match Classifier::new(&profile, config.node_names) {
-                Ok(classifier) => Some(ConnWatch::spawn(
-                    svc.hub.clone(),
-                    api,
-                    config.api_secret,
-                    classifier,
-                    POLL_INTERVAL,
-                )),
-                Err(e) => {
-                    // 方案已通过校验，不会走到这里；连接面板没有数据，会话照常运行
-                    tracing::error!(error = %e, "cannot attribute connections");
-                    None
-                }
-            };
-            *slot = Some(RunningSession {
-                kernel,
-                conn_watch,
-                guard,
-            });
-            let status = svc.hub.update_session(|s| {
-                s.state = SessionState::Running;
-                s.components.kernel = ComponentState::Active;
-            });
-            tracing::info!(profile = %profile.id, mode = "tun", "session started");
-            to_json(status)
-        }
+        Ok(Ok(kernel)) => Ok(kernel),
         Ok(Err(e)) => {
             svc.epoch.fetch_add(1, Ordering::SeqCst);
-            stop_guard(guard).await;
             svc.hub.update_session(|s| {
                 *s = initial_status();
                 s.components.kernel = ComponentState::Failed;
@@ -134,16 +350,30 @@ pub(super) async fn start(svc: &Services, params: Value) -> Result<Value, IpcErr
                 format!("sing-box failed to start: {e}"),
             ))
         }
-        Err(e) => {
-            svc.epoch.fetch_add(1, Ordering::SeqCst);
-            stop_guard(guard).await;
-            svc.hub.update_session(|s| *s = initial_status());
-            Err(IpcError::new(
-                ErrorCode::Internal,
-                format!("kernel launcher failed: {e}"),
-            ))
-        }
+        Err(e) => Err(abort_start(
+            svc,
+            ErrorCode::Internal,
+            format!("kernel launcher failed: {e}"),
+        )),
     }
+}
+
+/// 排除表：服务自身，加上节点服务器解析出的地址（C-NET-05）。sing-box 已按可执行文件排除在目标之外。
+async fn exclusions(servers: Vec<(String, u16)>) -> ExclusionSet {
+    let resolved = tokio::time::timeout(
+        RESOLVE_TIMEOUT,
+        tokio::task::spawn_blocking(move || resolve_servers(&servers)),
+    )
+    .await;
+    let ips = match resolved {
+        Ok(Ok(ips)) => ips,
+        _ => {
+            tracing::warn!("resolving node servers timed out; excluding by process only");
+            Vec::new()
+        }
+    };
+    let me = SystemProcesses.resolve(std::process::id());
+    ExclusionSet::new(me, ips)
 }
 
 pub(super) async fn stop(svc: &Services, params: Value) -> Result<Value, IpcError> {
@@ -175,16 +405,47 @@ pub(super) async fn shutdown(svc: &Services) {
     }
 }
 
-/// 先停连接轮询（为剩余连接发「已关闭」），再停内核，最后撤销阻断。
+/// 精确模式先撤下拦截（目标进程回到直连）再停中继与追踪；然后停连接轮询（为剩余连接发「已关闭」）、
+/// 停内核，最后撤销阻断。
 async fn stop_session(running: RunningSession) {
+    if let Some(p) = running.precise {
+        let backend = p.backend;
+        let _ = tokio::task::spawn_blocking(move || stop_backend(&backend)).await;
+        p.udp.shutdown();
+        p.relays.stop().await;
+        stop_watcher(p.watcher).await;
+        if let Some(t) = p.events {
+            let _ = tokio::task::spawn_blocking(move || t.join()).await;
+        }
+    }
     if let Some(watch) = running.conn_watch {
         watch.stop().await;
     }
-    let kernel = running.kernel;
+    stop_kernel(running.kernel).await;
+    stop_guard(running.guard).await;
+}
+
+/// 撤下拦截后端（撤销全部过滤器）。阻塞调用。
+fn stop_backend(backend: &SharedBackend) {
+    let taken = backend
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    if let Some(mut b) = taken
+        && let Err(e) = b.stop()
+    {
+        tracing::warn!(error = %e, "stopping the interception backend failed");
+    }
+}
+
+async fn stop_kernel(kernel: Box<dyn RunningKernel>) {
     if let Err(e) = tokio::task::spawn_blocking(move || kernel.stop()).await {
         tracing::error!(error = %e, "stopping the kernel failed");
     }
-    stop_guard(running.guard).await;
+}
+
+async fn stop_watcher(watcher: Watcher) {
+    let _ = tokio::task::spawn_blocking(move || watcher.stop()).await;
 }
 
 async fn install_guard(
@@ -216,35 +477,32 @@ async fn stop_guard(guard: Option<Box<dyn GuardHandle>>) {
     }
 }
 
-/// 拒绝当前还不能安全运行的组合（见模块文档）。
-fn check_supported(profile: &Profile) -> Result<(), IpcError> {
-    match profile.mode {
-        Mode::Precise => Err(IpcError::new(
-            ErrorCode::DriverNotLoaded,
-            "precise mode needs the interception driver, which is not available in this build yet",
-        )),
-        Mode::Tun => Ok(()),
-    }
-}
-
-struct TunConfig {
-    text: procroute_platform_win::secret::Secret<String>,
-    api_port: u16,
-    /// 控制 API 密钥，连接轮询要用。
-    api_secret: procroute_platform_win::secret::Secret<String>,
+/// 两种模式共用的出站与运行参数。
+struct Outbounds {
+    nodes: Vec<NodeOutbound>,
     /// 节点 id（出站标签）→ 节点名，连接面板显示用。
-    node_names: HashMap<String, String>,
+    names: HashMap<String, String>,
+    /// 节点服务器的域名或地址与端口，写进排除表用。
+    servers: Vec<(String, u16)>,
+    runtime: Runtime,
+    api_port: u16,
+    /// 控制 API 密钥，TUN 模式的连接轮询要用。
+    api_secret: Secret<String>,
 }
 
-/// 生成本次启动的 sing-box 配置：节点按 id 作为出站标签，控制 API 用随机端口与密钥（C-NET-08）。
-async fn tun_config(svc: &Services, profile: &Profile) -> Result<TunConfig, IpcError> {
+/// 节点按 id 作为出站标签，控制 API 用随机端口与密钥（C-NET-08）。
+async fn outbounds(svc: &Services) -> Result<Outbounds, IpcError> {
     let nodes = svc.nodes.clone();
     let stored = blocking(move || nodes.load().map_err(node::storage_error)).await?;
-    let node_names = stored
+    let names = stored
         .iter()
         .map(|n| (n.id.clone(), n.name.clone()))
         .collect();
-    let outbounds: Vec<NodeOutbound> = stored
+    let servers = stored
+        .iter()
+        .map(|n| (n.node.server.clone(), n.node.server_port))
+        .collect();
+    let nodes: Vec<NodeOutbound> = stored
         .into_iter()
         .map(|n| NodeOutbound {
             tag: n.id,
@@ -252,21 +510,94 @@ async fn tun_config(svc: &Services, profile: &Profile) -> Result<TunConfig, IpcE
             credentials: n.credentials,
         })
         .collect();
-    let api_port = free_loopback_port()
-        .map_err(|e| IpcError::new(ErrorCode::Internal, format!("no free loopback port: {e}")))?;
-    let api_secret =
-        random_api_secret().map_err(|e| IpcError::new(ErrorCode::Internal, e.to_string()))?;
+    let api_port = loopback_port()?;
+    let api_secret = secret()?;
     let runtime = Runtime {
         api_port,
         api_secret: api_secret.clone(),
         self_exe_paths: svc.self_exe_paths.clone(),
     };
-    let text = generate_tun(profile, &outbounds, &[], &runtime).map_err(gen_error)?;
-    Ok(TunConfig {
-        text,
+    Ok(Outbounds {
+        nodes,
+        names,
+        servers,
+        runtime,
         api_port,
         api_secret,
-        node_names,
+    })
+}
+
+fn loopback_port() -> Result<u16, IpcError> {
+    free_loopback_port()
+        .map_err(|e| IpcError::new(ErrorCode::Internal, format!("no free loopback port: {e}")))
+}
+
+fn secret() -> Result<Secret<String>, IpcError> {
+    random_api_secret().map_err(|e| IpcError::new(ErrorCode::Internal, e.to_string()))
+}
+
+struct TunConfig {
+    text: Secret<String>,
+    api_port: u16,
+    api_secret: Secret<String>,
+    node_names: HashMap<String, String>,
+}
+
+async fn tun_config(svc: &Services, profile: &Profile) -> Result<TunConfig, IpcError> {
+    let o = outbounds(svc).await?;
+    let text = generate_tun(profile, &o.nodes, &[], &o.runtime).map_err(gen_error)?;
+    Ok(TunConfig {
+        text,
+        api_port: o.api_port,
+        api_secret: o.api_secret,
+        node_names: o.names,
+    })
+}
+
+struct PreciseConfig {
+    text: Secret<String>,
+    api_port: u16,
+    socks_port: u16,
+    socks_password: Secret<String>,
+    servers: Vec<(String, u16)>,
+    /// 进程组下标 → （组标签, 出站显示名）。
+    labels: GroupLabels,
+    /// ProcRoute 自身的可执行文件（服务、界面、sing-box），永远不是目标。
+    self_paths: Vec<String>,
+}
+
+/// 精确模式的 sing-box 配置：本地 SOCKS 入口只绑定 127.0.0.1，端口与密码每次启动随机生成（C-NET-08）。
+async fn precise_config(svc: &Services, profile: &Profile) -> Result<PreciseConfig, IpcError> {
+    let o = outbounds(svc).await?;
+    let socks = SocksInbound {
+        port: loopback_port()?,
+        password: secret()?,
+    };
+    let text = generate_precise(profile, &o.nodes, &[], &o.runtime, &socks).map_err(gen_error)?;
+    let labels: GroupLabels = profile
+        .groups
+        .iter()
+        .map(|g| {
+            let outbound = o
+                .names
+                .get(&g.outbound)
+                .cloned()
+                .unwrap_or_else(|| g.outbound.clone());
+            (g.tag.clone(), outbound)
+        })
+        .collect();
+    let mut self_paths = svc.self_exe_paths.clone();
+    if let Some(kernel) = &svc.diag.kernel_exe {
+        self_paths.push(kernel.to_string_lossy().into_owned());
+    }
+    Ok(PreciseConfig {
+        text,
+        api_port: o.api_port,
+        socks_port: socks.port,
+        socks_password: socks.password,
+        servers: o.servers,
+        labels,
+        self_paths,
     })
 }
 
@@ -296,11 +627,14 @@ fn starting(profile: &Profile) -> SessionStatus {
 }
 
 /// 守护上报的状态写回会话。`epoch` 不再是当前值时（会话已停止或换了新会话）忽略。
+///
+/// `give_up`：守护放弃重启时、写回状态之前调用（精确模式的 `allow` 策略用它撤下拦截）。
 fn state_callback(
     hub: Arc<EventHub>,
     current: Arc<AtomicU64>,
     epoch: u64,
     policy: FailPolicy,
+    give_up: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> StateCallback {
     Box::new(move |state| {
         if current.load(Ordering::SeqCst) != epoch {
@@ -314,6 +648,9 @@ fn state_callback(
             KernelState::Stopped(StopReason::Requested) => {}
             KernelState::Stopped(reason) => {
                 tracing::error!(?reason, "sing-box supervision gave up");
+                if let Some(give_up) = &give_up {
+                    give_up();
+                }
             }
         }
         hub.update_session(|s| apply_kernel_state(s, policy, &state));
@@ -323,7 +660,7 @@ fn state_callback(
 /// 内核状态 → 会话状态。
 ///
 /// 守护放弃（超出重启上限或无法重新启动）时：`block` 进入 `blocked` 并给出原因，界面必须明确提示
-/// 「目标进程网络已阻断」（C-UI-02）；`allow` 是用户显式选择的放行，会话结束。
+/// 「目标进程网络已阻断」（C-UI-02）；`allow` 是用户显式选择的放行，会话结束，拦截已经撤下。
 fn apply_kernel_state(status: &mut SessionStatus, policy: FailPolicy, state: &KernelState) {
     let live = matches!(status.state, SessionState::Starting | SessionState::Running);
     match state {
@@ -351,7 +688,10 @@ fn apply_kernel_state(status: &mut SessionStatus, policy: FailPolicy, state: &Ke
                 }
                 FailPolicy::Allow => {
                     *status = SessionStatus {
-                        components: status.components,
+                        components: ComponentStatus {
+                            driver: ComponentState::Inactive,
+                            ..status.components
+                        },
                         ..initial_status()
                     };
                 }

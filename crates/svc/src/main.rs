@@ -38,6 +38,8 @@ mod log_stream;
 #[cfg(windows)]
 mod node_store;
 #[cfg(windows)]
+mod precise;
+#[cfg(windows)]
 mod store;
 
 #[cfg(not(windows))]
@@ -82,6 +84,7 @@ mod windows_main {
     use crate::kernel::SupervisedKernel;
     use crate::log_stream::BroadcastLayer;
     use crate::node_store::NodeStore;
+    use crate::precise::DivertFactory;
     use crate::store::ProfileStore;
 
     /// 服务名，与安装器注册时一致。
@@ -206,6 +209,10 @@ mod windows_main {
                 stream,
                 Arc::new(launcher),
                 Arc::new(WfpGuard),
+                // 锁定版本的 WinDivert 与服务放在同一安装目录（C-DRV-01）
+                Arc::new(DivertFactory {
+                    dir: install_dir.to_path_buf(),
+                }),
                 self_exe_paths,
             )
             .with_diagnostics(diag),

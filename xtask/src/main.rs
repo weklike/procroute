@@ -9,6 +9,10 @@ use std::process::ExitCode;
 mod fetch_deps;
 mod gen_types;
 #[cfg(windows)]
+mod sandbox;
+#[cfg(windows)]
+mod sandbox_dev;
+#[cfg(windows)]
 mod sandbox_test;
 
 const HELP: &str = "\
@@ -22,9 +26,12 @@ const HELP: &str = "\
   sandbox-test [--only <测试名>]... [--keep-open] [--timeout-mins <分钟>]
                       在 Windows Sandbox 中运行只允许在虚拟机里运行的测试
                       （驱动、WFP、管理员权限，C-TEST-04）
+  sandbox-dev [--timeout-mins <分钟>]
+                      在 Windows Sandbox 中以控制台模式运行真实的服务与界面，
+                      供手动联调（沙盒保持打开，关窗口即结束）
 
 尚未实现（见 TASKS.md）：
-  dev          在测试虚拟机中以控制台模式运行服务和界面
+  dev          在装有工具链的测试虚拟机中以控制台模式运行服务和 tauri dev
   bundle       打包安装包
   e2e          在 Hyper-V 虚拟机中运行端到端测试
 ";
@@ -44,6 +51,12 @@ fn main() -> ExitCode {
         #[cfg(not(windows))]
         Some("sandbox-test") => Err(anyhow::anyhow!(
             "sandbox-test 需要 Windows（Windows Sandbox）"
+        )),
+        #[cfg(windows)]
+        Some("sandbox-dev") => sandbox_dev::run(&args[1..]),
+        #[cfg(not(windows))]
+        Some("sandbox-dev") => Err(anyhow::anyhow!(
+            "sandbox-dev 需要 Windows（Windows Sandbox）"
         )),
         Some(other) => {
             eprintln!("未知命令：{other}\n");

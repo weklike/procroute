@@ -9,6 +9,7 @@ use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
 
+use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, FILETIME, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::TOKEN_QUERY;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -116,6 +117,49 @@ pub fn process_user_sid(pid: u32) -> io::Result<String> {
     token_user_sid(&token)
 }
 
+/// 父进程的 PID（创建它的进程；父进程可能已经退出、PID 已被复用，调用方要用创建时间核对，C-DRV-04）。
+/// 只查一个进程，比拍整份快照便宜：精确模式在进程追踪还没报到的新进程第一次连接时用它判定继承。
+pub fn process_parent_id(pid: u32) -> io::Result<u32> {
+    /// 与 `PROCESS_BASIC_INFORMATION` 布局一致（x64 上 48 字节）；只读最后一个字段。
+    #[repr(C)]
+    struct BasicInformation {
+        exit_status: i32,
+        peb_base_address: *mut std::ffi::c_void,
+        affinity_mask: usize,
+        base_priority: i32,
+        unique_process_id: usize,
+        inherited_from_unique_process_id: usize,
+    }
+    let process = open_process(pid)?;
+    let mut info = BasicInformation {
+        exit_status: 0,
+        peb_base_address: ptr::null_mut(),
+        affinity_mask: 0,
+        base_priority: 0,
+        unique_process_id: 0,
+        inherited_from_unique_process_id: 0,
+    };
+    let mut len = 0u32;
+    // SAFETY: 句柄有效且带 PROCESS_QUERY_LIMITED_INFORMATION（ProcessBasicInformation 所需）；
+    // `info` 的布局与 PROCESS_BASIC_INFORMATION 一致，长度如实传入；`len` 可写。
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process.as_raw_handle() as HANDLE,
+            ProcessBasicInformation,
+            (&raw mut info).cast(),
+            size_of::<BasicInformation>() as u32,
+            &mut len,
+        )
+    };
+    if status < 0 {
+        return Err(io::Error::other(format!(
+            "NtQueryInformationProcess failed with status {status:#x}"
+        )));
+    }
+    u32::try_from(info.inherited_from_unique_process_id)
+        .map_err(|_| io::Error::other("parent process id out of range"))
+}
+
 /// 进程所在的 Windows 会话（终端服务会话）id。
 pub fn process_session_id(pid: u32) -> io::Result<u32> {
     let mut session = 0u32;
@@ -206,6 +250,24 @@ mod tests {
         assert!(process_image_path(3).is_err());
         assert!(process_session_id(3).is_err());
         assert!(process_creation_time(3).is_err());
+        assert!(process_parent_id(3).is_err());
+    }
+
+    #[test]
+    fn parent_id_matches_the_snapshot() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping", "-n", "3", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let parent = process_parent_id(child.id()).expect("parent");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(parent, std::process::id(), "this test spawned it");
+        let me = std::process::id();
+        let snapshot = list_processes().expect("snapshot");
+        let entry = snapshot.iter().find(|e| e.pid == me).expect("this process");
+        assert_eq!(process_parent_id(me).expect("own parent"), entry.parent_pid);
     }
 
     #[test]

@@ -188,6 +188,10 @@ impl Address {
         self.set_bit(19, on);
     }
 
+    pub fn set_loopback(&mut self, on: bool) {
+        self.set_bit(18, on);
+    }
+
     pub fn ipv6(&self) -> bool {
         self.bit(20)
     }
@@ -225,6 +229,12 @@ impl Address {
             if_idx: self.u32_at(0),
             sub_if_idx: self.u32_at(4),
         }
+    }
+
+    /// 设置网络层的数据。入站注入时必须是有效的接口号（通常取自收到的包），出站注入时被忽略。
+    pub fn set_network(&mut self, n: NetworkData) {
+        self.data.0[0..4].copy_from_slice(&n.if_idx.to_ne_bytes());
+        self.data.0[4..8].copy_from_slice(&n.sub_if_idx.to_ne_bytes());
     }
 
     /// FLOW 层与 SOCKET 层的数据。

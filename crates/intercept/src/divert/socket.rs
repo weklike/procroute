@@ -3,10 +3,10 @@
 //!
 //! 以只嗅探方式（`SNIFF | RECV_ONLY`）打开 WinDivert 的 SOCKET 层，收 TCP / UDP 的 CONNECT 与 CLOSE 事件：
 //!
-//! - CONNECT：事件带 PID、本地端口与远端，补上进程创建时间组成进程身份（C-DRV-04）后按 [`decide`] 判定；
-//!   要改道或阻断的目标流登记进 [`FlowTable`]，NETWORK 层（T-075）按出站包查它；
-//! - 非目标进程只读这些元数据，不改写、不延迟（C-NET-02）。同一键上残留的旧登记随之清掉，
-//!   端口被非目标进程复用时不会被误改道；
+//! - CONNECT：事件带 PID、本地端口与远端，补上进程创建时间组成进程身份（C-DRV-04）后按 [`decide`] 判定，
+//!   结果登记进 [`FlowTable`]，NETWORK 层（T-075）在这条流的第一个 SYN 上查它；
+//! - 非目标流登记为 [`FlowAction::Bypass`]：只记五元组与 PID 这类归属元数据（C-NET-02 允许），让它的
+//!   第一个 SYN 立即放行，而不是当作「还没归属」暂存等待（C-NET-04）。端口被复用时新判定覆盖旧登记；
 //! - CLOSE：撤销该套接字的登记。
 //!
 //! 每条流在这里判定一次，计数器（含 `attribution_miss`）也在这里记一次。
@@ -76,22 +76,27 @@ pub fn decode(addr: &Address) -> Option<SocketEvent> {
     }
 }
 
-/// 目标流在 NETWORK 层要执行的动作。
+/// 一条流在 NETWORK 层要执行的动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetAction {
+pub enum FlowAction {
     /// 改道到本地中继，`group` 为进程组下标。
     Redirect { group: u16 },
     /// 阻断：TCP 回 RST、UDP 丢弃。
     Block,
+    /// 原样放行（非目标、排除、无法归属）。
+    Bypass,
 }
 
-/// 登记表里的一条目标流。
+/// 登记表里的一条流。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TargetFlow {
+pub struct FlowRecord {
     /// CONNECT 事件里的五元组。
     pub key: FlowKey,
-    pub process: ProcessKey,
-    pub action: TargetAction,
+    /// CONNECT 事件里的 PID，CLOSE 按它撤销登记。
+    pub pid: u32,
+    /// 进程身份；无法归属时为 `None`。
+    pub process: Option<ProcessKey>,
+    pub action: FlowAction,
 }
 
 /// 登记表的键：协议 + 本地端口 + 远端。出站包的这三项与 CONNECT 事件一致；本地地址不参与，
@@ -115,11 +120,12 @@ impl SlotKey {
     }
 }
 
-type Shard = HashMap<SlotKey, TargetFlow>;
+type Shard = HashMap<SlotKey, FlowRecord>;
 
-/// 目标流登记表：SOCKET 层写，NETWORK 层（T-075）读。
+/// 流登记表：SOCKET 层写，NETWORK 层（T-075）读。
 ///
-/// 只登记目标流；非目标流不进表（C-NET-02）。满了以后拒绝新登记并计数，不淘汰已有的登记。
+/// 满了以后拒绝新登记并计数，不淘汰已有的登记。放行登记只用到上限的四分之三，余下的留给
+/// 要改道或阻断的流：放行登记被拒的流只是第一个 SYN 走一遍慢路径，目标流登记被拒则要靠兜底归属。
 #[derive(Debug)]
 pub struct FlowTable {
     shards: Box<[Mutex<Shard>]>,
@@ -155,15 +161,19 @@ impl FlowTable {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// 登记或覆盖一条目标流。表满且是新键时拒绝并返回 `false`。
-    pub fn register(&self, flow: TargetFlow) -> bool {
+    /// 登记或覆盖一条流。表满且是新键时拒绝并返回 `false`。
+    pub fn register(&self, flow: FlowRecord) -> bool {
         let slot = SlotKey::new(flow.key.network, flow.key.local.port(), flow.key.remote);
         let mut shard = self.shard(slot.local_port);
         if let Some(existing) = shard.get_mut(&slot) {
             *existing = flow;
             return true;
         }
-        if self.len.load(Ordering::Relaxed) >= self.capacity {
+        let limit = match flow.action {
+            FlowAction::Bypass => self.capacity / 4 * 3,
+            FlowAction::Redirect { .. } | FlowAction::Block => self.capacity,
+        };
+        if self.len.load(Ordering::Relaxed) >= limit {
             self.overflows.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -173,14 +183,27 @@ impl FlowTable {
     }
 
     /// 按出站包的协议、本地端口与远端查登记。只锁一个分片，不分配内存（C-CODE-04）。
-    pub fn get(&self, network: Network, local_port: u16, remote: SocketAddr) -> Option<TargetFlow> {
+    pub fn get(&self, network: Network, local_port: u16, remote: SocketAddr) -> Option<FlowRecord> {
         self.shard(local_port)
             .get(&SlotKey::new(network, local_port, remote))
             .copied()
     }
 
+    /// NETWORK 层看到一条 TCP 流的第一个 SYN 时取登记：改道与放行的登记就此用完、移出表
+    /// （之后由连接跟踪接手，或者不再需要）；阻断的登记留到 CLOSE，重传的 SYN 照样被挡。
+    pub fn take_for_syn(&self, local_port: u16, remote: SocketAddr) -> Option<FlowRecord> {
+        let slot = SlotKey::new(Network::Tcp, local_port, remote);
+        let mut shard = self.shard(local_port);
+        let record = *shard.get(&slot)?;
+        if record.action != FlowAction::Block {
+            shard.remove(&slot);
+            self.len.fetch_sub(1, Ordering::Relaxed);
+        }
+        Some(record)
+    }
+
     /// 撤销一条登记（不论属于哪个进程）。
-    pub fn unregister(&self, key: &FlowKey) -> Option<TargetFlow> {
+    pub fn unregister(&self, key: &FlowKey) -> Option<FlowRecord> {
         let slot = SlotKey::new(key.network, key.local.port(), key.remote);
         let removed = self.shard(slot.local_port).remove(&slot);
         if removed.is_some() {
@@ -204,7 +227,7 @@ impl FlowTable {
             let same_socket = k.network == network
                 && k.local_port == local_port
                 && remote.is_none_or(|r| (k.remote_ip, k.remote_port) == (r.ip(), r.port()));
-            !(same_socket && f.process.pid == pid)
+            !(same_socket && f.pid == pid)
         });
         let removed = before - shard.len();
         self.len.fetch_sub(removed, Ordering::Relaxed);
@@ -234,7 +257,7 @@ impl FlowTable {
     }
 
     /// 全部登记的副本，供诊断与测试使用（会分配内存，不要用在逐包路径上）。
-    pub fn entries(&self) -> Vec<TargetFlow> {
+    pub fn entries(&self) -> Vec<FlowRecord> {
         let mut all = Vec::with_capacity(self.len());
         for shard in &self.shards {
             let shard = shard.lock().unwrap_or_else(PoisonError::into_inner);
@@ -330,7 +353,7 @@ impl Attributor {
     /// 处理一个事件。CONNECT 返回判定结果，CLOSE 返回 `None`。
     pub fn handle(&self, event: SocketEvent) -> Option<Verdict> {
         match event {
-            SocketEvent::Connect { pid, key } => Some(self.connect(pid, key)),
+            SocketEvent::Connect { pid, key } => Some(self.attribute(pid, key).0),
             SocketEvent::Close { pid, key } => {
                 // 未连接的 UDP 套接字关闭时没有远端
                 let remote = (key.remote.port() != 0).then_some(key.remote);
@@ -341,7 +364,9 @@ impl Attributor {
         }
     }
 
-    fn connect(&self, pid: u32, key: FlowKey) -> Verdict {
+    /// 判定一条新流并登记。SOCKET 层的 CONNECT 与 NETWORK 层的兜底归属（端口反查到 PID 后）都走这里，
+    /// 每条流只判定一次。返回判定与登记的内容（登记可能因表满被拒，见 [`FlowTable::register`]）。
+    pub fn attribute(&self, pid: u32, key: FlowKey) -> (Verdict, FlowRecord) {
         let process = self.resolver.resolve(pid);
         let flow = NewFlow { key, process };
         let verdict = decide(
@@ -351,25 +376,28 @@ impl Attributor {
             self.policy.as_ref(),
             &self.counters,
         );
-        let action = match verdict {
-            Verdict::Redirect { group } => Some(TargetAction::Redirect { group }),
-            Verdict::Block => Some(TargetAction::Block),
-            Verdict::Bypass(_) => None,
+        let action = match (verdict, process) {
+            (Verdict::Redirect { group }, Some(_)) => FlowAction::Redirect { group },
+            (Verdict::Block, Some(_)) => FlowAction::Block,
+            // decide 只在归属成功时改道或阻断；其余一律放行
+            _ => FlowAction::Bypass,
         };
-        match (action, process) {
-            (Some(action), Some(process)) => {
-                self.table.register(TargetFlow {
-                    key,
-                    process,
-                    action,
-                });
-            }
-            // 非目标：只清掉同一键上可能残留的旧登记，其余什么也不做（C-NET-02）
-            _ => {
-                self.table.unregister(&key);
-            }
-        }
-        verdict
+        let record = FlowRecord {
+            key,
+            pid,
+            process,
+            action,
+        };
+        self.table.register(record);
+        (verdict, record)
+    }
+
+    pub fn settings(&self) -> &InterceptSettings {
+        &self.settings
+    }
+
+    pub fn counters(&self) -> &Arc<Counters> {
+        &self.counters
     }
 }
 

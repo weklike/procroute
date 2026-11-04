@@ -106,3 +106,19 @@ fn tampered_files_are_refused() {
     );
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+#[test]
+fn network_data_and_loopback_can_be_set_for_injection() {
+    let mut a = Address::from_parts(Layer::Network as u32 | (1 << 17) | (1 << 18), [0; 64]);
+    assert!(a.loopback() && a.outbound());
+    let n = NetworkData {
+        if_idx: 12,
+        sub_if_idx: 3,
+    };
+    a.set_network(n);
+    a.set_loopback(false);
+    a.set_outbound(false);
+    assert_eq!(a.network(), n);
+    assert!(!a.loopback() && !a.outbound());
+    assert_eq!(a.layer(), Layer::Network as u8, "other bits are untouched");
+}
