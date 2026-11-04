@@ -43,9 +43,9 @@
 | 阶段 | 已完成 | 下一条 |
 | --- | --- | --- |
 | M0 | T-000 ~ T-010、T-020 ~ T-022、T-030 ~ T-033、T-040 ~ T-042 | M0 中需要 Windows 的验证：WinDivert 改道原型（见 M0 里程碑验收） |
-| M1 | T-050 ~ T-058、T-060 ~ T-062；TUN + `block` 的 WFP 阻断已在沙盒中验证；收窄令牌后 ETW 可用（沙盒，见下） | 收窄令牌后 wintun 能否创建：在 `cargo xtask sandbox-dev` 里启动一次 TUN 会话确认 |
+| M1 | T-050 ~ T-058、T-060 ~ T-062；TUN + `block` 的 WFP 阻断已在沙盒中验证；收窄令牌后 ETW 与 wintun 都可用（沙盒，见下） | 完成 |
 | M2 | T-070 ~ T-076、T-078 ~ T-080（精确模式端到端与泄漏测试已在沙盒中通过，见下）；T-077 的排除与撤销部分 | M2 验收的「1 小时混合流量」；T-077 剩下的「代理地址变化 1 秒内更新排除表」（会话中改节点时） |
-| M3 | T-090 ~ T-097（UDP 中继、QUIC 阻断、子进程继承、多出站分组均已接线，见下） | IPv6 上的泄漏测试（沙盒没有 IPv6 路由）；已经分片的包与 ICMP（T-091 下的已知缺口） |
+| M3 | T-090 ~ T-097（UDP 中继、QUIC 阻断、子进程继承、多出站分组均已接线，见下） | IPv6 上的泄漏测试（沙盒没有 IPv6 路由）；已经分片的包（T-091 下的已知缺口） |
 | M4 | T-110（一次性证书的安装器，安装 / 升级 / 卸载已在沙盒中验证；发布 Release 时自动打包上传，见下）、T-112、T-113（外壳与界面部分，见下） | 在本机安装试用（用户自己装）；T-111 自动更新（需要独立的更新签名密钥，AGENTS 第 8 节第 4 条）；M4 / v1.0 验收清单（在此之前的 Release 标记为预发布） |
 
 偏离原计划的地方：
@@ -53,6 +53,7 @@
 - `Profile` 定义在 proto，rules 依赖 proto 而非 config（docs/adr/0001）。
 - 发版用一次性自签名证书，服务按「同一张证书」校验客户端，没有用 design 9.3 假定的公共信任证书（docs/adr/0002）。
 - 泄漏检测器的观察点是优先级最低的 WinDivert 只嗅探句柄，不是 design 第 12 节说的物理网卡（T-080）。
+- 方案可以选择在会话期间挡住全机 ping，这是 C-NET-02 的例外（docs/adr/0003），默认关闭。
 - 前端 Tauri 事件名把 `.` 换成 `:`，例如 `conn.subscribe` → `ipc:conn:subscribe`（app/src/api/client.ts）。
 - `IpcError` 增加可选的 `fields`（`path` + `code` + `message`），表单据此把服务端校验问题标到对应字段；
   `procroute-config::validate::to_ipc_error` 负责转换。属于新增可选字段，协议版本不变。
@@ -85,7 +86,8 @@
     处理（不进 `Handler`），订阅持续到连接断开，`log.subscribe` 按 `min_level` 过滤。服务日志经 `svc::log_stream`
     转成日志事件；sing-box 自己的输出直接丢弃（它的日志带网关、目标地址）。连接事件的来源随 M2 接入。
   - 服务在配置目录加固之后移除令牌特权，只保留 `SeTcb`（`WTSQueryUserToken`）、`SeLoadDriver`（wintun /
-    WinDivert）、`SeChangeNotify`、`SeCreateGlobal`（C-SEC-06）。**待验证**：虚拟机里确认 TUN 在收窄后的令牌下可用。
+    WinDivert）、`SeChangeNotify`、`SeCreateGlobal`（C-SEC-06）。TUN 在收窄后的令牌下可用：`leak_e2e` 在控制台模式下启动 TUN
+    会话，确认系统里出现了 TUN 网卡的地址（2026-11-04）。
 - node.import 的支持范围（近五年主流客户端通用、且 sing-box 1.14.4 支持；详见 `core-mgr::link` 模块文档）：
   `ss://`（SIP002 / 旧版整段 Base64，AEAD 与 2022 加密，插件 obfs-local / v2ray-plugin）、`vmess://`（v2rayN JSON，
   只收 AEAD）、`vless://` / `trojan://`（Xray 分享链接标准，含 REALITY 与 Vision）、`hysteria2://` / `hy2://`、`tuic://`（v5）、
@@ -172,12 +174,19 @@
   - 2026-11-04 更正（T-080 的实测）：NETWORK 层看到的是分片之前的完整数据报（4000 字节的 UDP 是一个 4028 字节
     的包），所以普通的大数据报能进中继、回显正确，不存在原先记录的「分片的目标 UDP 绕过代理」。原先观察到的现象其实是
     下面的首包泄漏，与大小无关。
-  - **已知缺口**（都违反 C-NET-07 的字面要求，要改需要人来定）：
-    - 已经分片的 IPv4 包（原始套接字才会产生）与带扩展头的 IPv6 包读不出端口，原样放回。IPv6 上的行为没有实测，
-      沙盒没有 IPv6 路由；
-    - ICMP 不在拦截层的过滤器里，目标进程的 ICMP 直接发出。按发送方式有两种情况（沙盒实测）：`ping.exe`、.NET
-      `Ping` 这类走 `IcmpSendEcho` 的，SOCKET 与 FLOW 事件的 PID 都是 4，归属不到调用进程，做不到只拦目标进程的；
-      进程自己开原始套接字发的，事件带真实 PID，可以按 fail_policy 处理，还没有做。
+  - **已知缺口**（违反 C-NET-07 的字面要求，要改需要人来定）：已经分片的 IPv4 包（原始套接字才会产生）与带扩展头
+    的 IPv6 包读不出端口，原样放回。IPv6 上的行为没有实测，沙盒没有 IPv6 路由。
+- 拦截层管不到的协议（2026-11-04，`platform-win::wfp::ProtocolFilters`、`svc::protocol_filters`，维护者选择的方案）。拦截层只
+  改道 TCP 与 UDP，ICMP 按发送方式有两种情况（沙盒实测）：`ping.exe`、.NET `Ping` 这类走 `IcmpSendEcho` 的，SOCKET 与 FLOW 事件
+  的 PID 都是 4，归属不到调用进程；进程自己开原始套接字发的，事件带真实 PID。于是：
+  - 精确模式 + `block`：目标可执行文件 TCP、UDP 以外的协议在 `ALE_AUTH_CONNECT` 挡住（C-NET-07）。包发出之前同步判定，没有首包
+    竞态，也不用抓其他进程的包。按可执行文件判定：同一文件的非目标进程也一起挡，进程退出后不撤销，直到会话结束。完整路径
+    规则启动时就装好；其他规则与继承来的子进程等进程追踪报到（约 100 ms），这段时间没有保护。回环、链路本地、组播、广播放行。
+  - 方案字段 `icmp.block_all_ping`（schema 3，默认关闭，开启前要确认）：会话期间挡住全机发往外部的回显请求（ICMP 类型 8、
+    ICMPv6 类型 128），不看 fail_policy，两种模式都生效。是 C-NET-02 的例外（docs/adr/0003）。只挡回显请求，IPv6 邻居发现不受影响。
+  - 装不上就不启动会话（`session.fail_closed_unsupported`）。过滤器随会话结束、服务退出撤销（C-NET-06）；`allow` 策略下内核放弃
+    重启、会话结束时一并撤销。
+  - `leak_e2e` 覆盖了 IPv4 上的全部行为。IPv6 的回显请求与 ICMPv6 原始套接字没有实测，沙盒没有 IPv6 路由。
 - 修复（2026-11-04，T-080 查出）：目标进程的**第一个 UDP 数据报泄漏**。没有登记的数据报原来直接放回，而刚启动的
   进程要当场判定、CONNECT 事件走得慢，第一个数据报几乎每次都赢（改之前实测：刚启动就发包的 24 个 UDP 进程有 22 个泄漏，
   10 个经启动器继承的全部泄漏，都收不到回包；TCP 一直没有泄漏）。现在和 SYN 一样暂存，50 ms 后按本地地址与端口在 UDP 表里反查（`platform-win::nettable::udp_owner_pid`，
@@ -262,8 +271,7 @@
     映射进沙盒，复制到本地盘、给 AppContainer 授权后经 `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` 使用。
   - 同一原因，沙盒里连代理服务器多半也会失败：沙盒联调适合看界面与服务的交互，走代理的效果要在能直连外网的虚拟机里看。
   - 控制台模式下服务收窄令牌后（移除 21 个特权）控制管道正常监听，界面能连上；WinDivert 驱动加载与 ETW 进程
-    事件也正常（见 T-078 的端到端测试）。收窄令牌后 wintun 能否创建（M1 剩下的一条）需要在沙盒里启动一次 TUN
-    会话确认。
+    事件也正常（见 T-078 的端到端测试），wintun 也能创建（见 T-058）。
   - std 在 Windows 上创建子进程总是继承可继承句柄，`cmd /C start` 也一样（实测），沙盒启动器会一直拿着调用方的
     输出管道；改经 PowerShell 的 `Start-Process`（ShellExecute）启动。
 - relay 不在连接关闭时删除 NAT 表项：拦截层改写最后的 FIN/ACK 还要用它，由拦截层的 `Closed` 事件或空闲超时回收。
