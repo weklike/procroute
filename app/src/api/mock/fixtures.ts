@@ -188,6 +188,13 @@ export const PROCESSES: ProcessInfo[] = [
     path: 'C:\\Program Files\\Mozilla Firefox\\firefox.exe',
     matched_group: 'browser',
   },
+  {
+    // 真实机器上常见的长路径，界面要能放得下
+    pid: 5140,
+    name: 'WindowsPackageManagerServer.exe',
+    path: 'C:\\Program Files\\WindowsApps\\Microsoft.DesktopAppInstaller_1.27.350.0_x64__8wekyb3d8bbwe\\WindowsPackageManagerServer.exe',
+    matched_group: null,
+  },
 ]
 
 /** 模拟连接：进程、目标、协议、组、出站。 */
