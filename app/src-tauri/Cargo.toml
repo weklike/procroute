@@ -25,6 +25,8 @@ tauri-plugin-autostart = "2.7.0"
 thiserror = "2.0.21"
 # 与服务端相同的命名管道实现；Tauri 自身的异步运行时也是 tokio
 tokio = { version = "1.54.1", features = ["net", "io-util", "sync", "time", "macros", "rt"] }
+# 「添加进程」的文件夹选择用系统对话框。只从 Rust 调用，capabilities 不给前端插件自己的命令
+tauri-plugin-dialog = "2.8.4"
 
 [lints]
 workspace = true

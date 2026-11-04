@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 「添加进程」对话框（设计稿 AddProcess）：从运行中的进程挑选，或手动输入规则。
+// 「添加进程」对话框（设计稿 AddProcess）：从运行中的进程挑选、选一个文件夹，或手动输入规则。
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import type { MatchRule, MatchType, ProcessInfo } from '@/api/generated'
+import FieldError from '@/components/FieldError'
 import NativeSelect from '@/components/NativeSelect'
 import { Button } from '@/components/ui/button'
 import {
@@ -18,11 +19,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 
-import { useProcesses } from './api'
-import { makeRule, MATCH_TYPES, parentDir } from './form'
+import { useFolderPicker, useProcesses } from './api'
+import { isAbsolutePath, makeRule, MATCH_TYPES, parentDir } from './form'
 
 type By = 'name' | 'path' | 'dir'
-type Tab = 'running' | 'manual'
+type Tab = 'running' | 'folder' | 'manual'
 
 type Props = {
   open: boolean
@@ -46,6 +47,8 @@ export default function AddRuleDialog({ open, onOpenChange, title, hint, onAdd }
   const [by, setBy] = useState<By>('name')
   const [manualType, setManualType] = useState<MatchType>('glob')
   const [manualValue, setManualValue] = useState('')
+  const [folder, setFolder] = useState('')
+  const [recursive, setRecursive] = useState(true)
   const processes = useProcesses(open)
 
   const shown = useMemo(() => {
@@ -62,6 +65,8 @@ export default function AddRuleDialog({ open, onOpenChange, title, hint, onAdd }
       setPicked(new Set())
       setQuery('')
       setManualValue('')
+      setFolder('')
+      setRecursive(true)
     }
   }
 
@@ -77,7 +82,9 @@ export default function AddRuleDialog({ open, onOpenChange, title, hint, onAdd }
         ? (processes.data?.processes ?? [])
             .filter((p) => picked.has(p.pid))
             .map((p) => toRule(p, by))
-        : [makeRule(manualType, manualValue.trim())]
+        : tab === 'folder'
+          ? [{ ...makeRule('dir', folder.trim()), recursive }]
+          : [makeRule(manualType, manualValue.trim())]
     // 同名进程只加一次
     const unique = rules.filter(
       (r, i) => rules.findIndex((x) => x.type === r.type && x.value === r.value) === i,
@@ -86,7 +93,12 @@ export default function AddRuleDialog({ open, onOpenChange, title, hint, onAdd }
     close(false)
   }
 
-  const canAdd = tab === 'running' ? picked.size > 0 : manualValue.trim() !== ''
+  const canAdd =
+    tab === 'running'
+      ? picked.size > 0
+      : tab === 'folder'
+        ? isAbsolutePath(folder)
+        : manualValue.trim() !== ''
 
   return (
     <Dialog open={open} onOpenChange={close}>
@@ -98,9 +110,9 @@ export default function AddRuleDialog({ open, onOpenChange, title, hint, onAdd }
         <div
           role="tablist"
           aria-label={title}
-          className="bg-muted inline-flex gap-0.5 self-start rounded-lg p-1"
+          className="bg-muted inline-flex gap-0.5 justify-self-start rounded-lg p-1"
         >
-          {(['running', 'manual'] as const).map((id) => (
+          {(['running', 'folder', 'manual'] as const).map((id) => (
             <button
               key={id}
               type="button"
@@ -125,6 +137,13 @@ export default function AddRuleDialog({ open, onOpenChange, title, hint, onAdd }
             onToggle={toggle}
             by={by}
             onBy={setBy}
+          />
+        ) : tab === 'folder' ? (
+          <FolderTab
+            folder={folder}
+            onFolder={setFolder}
+            recursive={recursive}
+            onRecursive={setRecursive}
           />
         ) : (
           <div role="tabpanel" className="grid gap-3 sm:grid-cols-[10rem_1fr]">
@@ -173,6 +192,70 @@ export default function AddRuleDialog({ open, onOpenChange, title, hint, onAdd }
   )
 }
 
+type FolderProps = {
+  folder: string
+  onFolder: (folder: string) => void
+  recursive: boolean
+  onRecursive: (recursive: boolean) => void
+}
+
+/** 选一个文件夹：生成一条目录规则，匹配里面的所有程序，不管现在有没有运行。 */
+function FolderTab({ folder, onFolder, recursive, onRecursive }: FolderProps) {
+  const { t } = useTranslation()
+  const picker = useFolderPicker()
+  const invalid = folder.trim() !== '' && !isAbsolutePath(folder)
+  return (
+    <div role="tabpanel" className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="rule-folder">{t('profile.add.folder')}</Label>
+        <div className="flex gap-2">
+          <Input
+            id="rule-folder"
+            className="font-mono"
+            placeholder={t('profile.add.folderPlaceholder')}
+            spellCheck={false}
+            autoComplete="off"
+            aria-invalid={invalid ? true : undefined}
+            aria-describedby={invalid ? 'rule-folder-error' : 'rule-folder-hint'}
+            value={folder}
+            onChange={(e) => onFolder(e.target.value)}
+          />
+          {picker.available ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={picker.isPending}
+              onClick={() =>
+                picker.pick(t('profile.add.folderDialogTitle'), (path) => {
+                  if (path) onFolder(path)
+                })
+              }
+            >
+              {t('profile.add.browse')}
+            </Button>
+          ) : null}
+        </div>
+        <FieldError
+          id="rule-folder-error"
+          message={invalid ? 'profile.add.folderInvalid' : undefined}
+        />
+        <p id="rule-folder-hint" className="text-muted-foreground text-[13px]">
+          {t('profile.add.folderHint')}
+        </p>
+      </div>
+      <label className="flex items-center gap-2 text-[13px]">
+        <input
+          type="checkbox"
+          className="accent-brand size-4"
+          checked={recursive}
+          onChange={(e) => onRecursive(e.target.checked)}
+        />
+        {t('profile.add.includeSubfolders')}
+      </label>
+    </div>
+  )
+}
+
 type RunningProps = {
   processes: ProcessInfo[]
   query: string
@@ -194,7 +277,7 @@ function RunningTab({ processes, query, onQuery, picked, onToggle, by, onBy }: R
         value={query}
         onChange={(e) => onQuery(e.target.value)}
       />
-      <ul className="max-h-72 overflow-y-auto rounded-lg border">
+      <ul className="max-h-[min(18rem,40dvh)] overflow-y-auto rounded-lg border">
         {processes.length === 0 ? (
           <li className="text-muted-foreground p-3 text-sm">{t('profile.add.noProcesses')}</li>
         ) : null}

@@ -58,6 +58,11 @@ export async function onServiceConnection(
   })
 }
 
+/** 弹出系统的文件夹选择对话框，返回完整路径；取消时为 `null`。 */
+export async function pickFolder(title: string): Promise<string | null> {
+  return invoke<string | null>('pick_folder', { title })
+}
+
 export async function getAutostart(): Promise<boolean> {
   return invoke<boolean>('autostart_get')
 }

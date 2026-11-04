@@ -8,7 +8,8 @@
 //!   点击后外壳只处理「显示主窗口」「退出」，其余菜单项发 [`TRAY_EVENT`] 交给前端
 //!   （启动 / 停止会话、切换方案都走前端已有的 IPC 调用）；
 //! - `autostart_*`：开机自启写当前用户的 Run 键，自启时带 [`MINIMIZED_ARG`]，只进托盘不弹窗；
-//! - `diag_export`：见 [`crate::diag`]。
+//! - `diag_export`：见 [`crate::diag`]；
+//! - `pick_folder`：系统的文件夹选择对话框。标题由前端给（文案走 i18n，C-UI-04），只返回用户选的路径。
 
 use std::sync::Arc;
 
@@ -20,9 +21,13 @@ use tauri::menu::{
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WindowEvent, Wry};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::diag;
 use crate::ipc::{CallError, Client, Outbound, PIPE_NAME};
+
+/// 文件夹对话框标题的长度上限（字符）。标题来自前端，这里只是防止传入过长的内容。
+const MAX_DIALOG_TITLE_CHARS: usize = 128;
 
 /// 主窗口标签，与 `tauri.conf.json` 一致。
 const MAIN_WINDOW: &str = "main";
@@ -50,6 +55,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
         }))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![MINIMIZED_ARG]),
@@ -59,7 +65,8 @@ pub fn run() {
             tray_update,
             autostart_get,
             autostart_set,
-            diag::diag_export
+            diag::diag_export,
+            pick_folder
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -92,6 +99,24 @@ pub fn run() {
 }
 
 /// 前端的唯一服务入口（C-CODE-09）。
+/// 弹出系统的文件夹选择对话框，返回完整路径；取消时返回 `None`。对话框在自己的线程上运行，这里只等结果。
+#[tauri::command]
+async fn pick_folder(window: tauri::Window, title: String) -> Option<String> {
+    let title: String = title.chars().take(MAX_DIALOG_TITLE_CHARS).collect();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title(title)
+        .pick_folder(move |picked| {
+            let _ = tx.send(picked);
+        });
+    let picked = rx.await.ok().flatten()?;
+    let path = picked.into_path().ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 async fn ipc_call(
     client: State<'_, Arc<Client>>,

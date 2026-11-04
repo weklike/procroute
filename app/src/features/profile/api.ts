@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { call, IpcError } from '@/api/client'
 import type { FieldIssue, Profile } from '@/api/generated'
+import { inShell, pickFolder } from '@/api/shell'
 
 export const profileKeys = {
   all: ['profile'] as const,
@@ -47,6 +48,17 @@ export function useProcesses(enabled: boolean) {
     queryFn: () => call('process.list', {}),
     enabled,
   })
+}
+
+/** 系统的文件夹选择对话框；`available` 为 false 时（不在桌面外壳里）界面不显示入口。 */
+export function useFolderPicker() {
+  const mutation = useMutation({ mutationFn: (title: string) => pickFolder(title) })
+  return {
+    available: inShell(),
+    isPending: mutation.isPending,
+    pick: (title: string, onPicked: (path: string | null) => void) =>
+      mutation.mutate(title, { onSuccess: onPicked }),
+  }
 }
 
 /** 取出服务端返回的逐字段校验问题；不是校验错误时为空。 */
