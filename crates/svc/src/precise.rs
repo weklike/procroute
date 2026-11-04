@@ -2,9 +2,10 @@
 //! 精确进程模式的会话组件（T-078，设计文档 6.1）。
 //!
 //! - [`Targets`]：拦截层问「这个进程是不是目标」的答案（`FlowPolicy`）。进程追踪（T-079）报来的目标进程
-//!   与进程组为准；还没报到的新进程（ETW 约 100 ms 的延迟内）在它第一次 connect 时当场按规则判定，免得
-//!   新启动的目标进程头几个连接直连。当场判定只看自身规则，继承来的子进程要等追踪报到。ProcRoute 自身
-//!   （服务、界面、sing-box）永远不是目标（C-NET-05），否则 sing-box 去代理服务器的连接会被改道成环；
+//!   与进程组为准；还没报到的新进程（ETW 约 100 ms 的延迟内）在它第一次 connect 时当场判定，免得新启动的
+//!   目标进程头几个连接直连：先看自身规则，没命中再看父进程（查父 PID、用创建时间核对，C-DRV-04）是不是
+//!   允许继承的目标组（F7，与 `rules::inherit` 的判定一致），最多往上查几层。ProcRoute 自身（服务、界面、
+//!   sing-box）永远不是目标（C-NET-05），否则 sing-box 去代理服务器的连接会被改道成环；
 //! - 回环中继：IPv4 与（可用时）IPv6 各一个，共用一张 NAT 表，[`NatMap`] 把改道登记进去；中继只连 sing-box
 //!   的本地 SOCKS 入口，没有直连的代码路径（C-NET-03）；
 //! - UDP（T-091）：[`UdpBridge`] 把拦截层交来的数据报送进 UDP 中继（每个会话一个 SOCKS5 UDP ASSOCIATE），
@@ -26,6 +27,7 @@ use procroute_intercept::divert::socket::SystemProcesses;
 use procroute_intercept::divert::udp::{UdpForward, UdpReplies};
 use procroute_intercept::divert::{DivertConfig, DivertInterceptor};
 use procroute_intercept::{FlowEvent, FlowPolicy, Interceptor, ProcessKey};
+use procroute_platform_win::process::{process_creation_time, process_parent_id};
 use procroute_platform_win::secret::Secret;
 use procroute_procwatch::Change;
 use procroute_procwatch::snapshot::image_path;
@@ -35,7 +37,7 @@ use procroute_relay::tcp::{
     DEFAULT_CONNECT_TIMEOUT, SharedNat, SniffConfig, TcpRelay, TcpRelayConfig,
 };
 use procroute_relay::udp::{Datagram, UdpRelay, UdpRelayConfig, UdpReplySink};
-use procroute_rules::engine::RuleEngine;
+use procroute_rules::engine::{Decision, RuleEngine};
 use procroute_rules::matcher::NormalizedProcess;
 use procroute_rules::path::normalize_path;
 use tokio::sync::watch;
@@ -46,6 +48,8 @@ use crate::events::EventHub;
 const RECEIVERS: usize = 2;
 /// 当场判定结果的缓存上限，满了整体清空（只是缓存，清掉的进程下次连接时重新判定）。
 const CHECKED_LIMIT: usize = 4096;
+/// 当场判定继承时最多往上查几层父进程（启动器 → 中间进程 → 游戏）。
+const MAX_ANCESTORS: u8 = 4;
 
 /// 创建拦截后端（未启动）。
 pub trait BackendFactory: Send + Sync + 'static {
@@ -93,6 +97,8 @@ pub struct Targets {
     /// 追踪还没报到的进程的当场判定结果。
     checked: Mutex<HashMap<ProcessKey, Option<u16>>>,
     engine: RuleEngine,
+    /// 各进程组是否把子进程纳入本组（`include_children`）。
+    include_children: Vec<bool>,
     /// ProcRoute 自身的可执行文件，规范化后的路径。
     self_paths: Vec<String>,
 }
@@ -106,11 +112,13 @@ impl std::fmt::Debug for Targets {
 }
 
 impl Targets {
-    pub fn new(engine: RuleEngine, self_paths: &[String]) -> Self {
+    /// `include_children` 按进程组下标给出方案里的继承开关。
+    pub fn new(engine: RuleEngine, include_children: Vec<bool>, self_paths: &[String]) -> Self {
         Self {
             known: RwLock::default(),
             checked: Mutex::default(),
             engine,
+            include_children,
             self_paths: self_paths.iter().map(|p| normalize_path(p)).collect(),
         }
     }
@@ -171,8 +179,32 @@ impl Targets {
         self.read().get(key).map(|t| t.name.clone())
     }
 
-    /// 追踪还没报到的进程：按映像路径当场判定。查不到路径（已退出、打不开）的不是目标。
-    fn decide_now(&self, key: ProcessKey) -> Option<u16> {
+    /// 一个进程的进程组：追踪报来的为准，其次是缓存的当场判定，最后当场判定（并缓存）。
+    fn group_of(&self, key: ProcessKey, depth: u8) -> Option<u16> {
+        if let Some(t) = self.read().get(&key) {
+            return Some(t.group);
+        }
+        let cached = self
+            .checked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .copied();
+        if let Some(decided) = cached {
+            return decided;
+        }
+        let decided = self.decide_now(key, depth);
+        let mut checked = self.checked.lock().unwrap_or_else(PoisonError::into_inner);
+        if checked.len() >= CHECKED_LIMIT {
+            checked.clear();
+        }
+        checked.insert(key, decided);
+        decided
+    }
+
+    /// 追踪还没报到的进程：按映像路径当场判定自身规则；没有命中（也没被排除）时看父进程。
+    /// 查不到路径（已退出、打不开）的不是目标。
+    fn decide_now(&self, key: ProcessKey, depth: u8) -> Option<u16> {
         let path = image_path(procroute_procwatch::ProcessKey {
             pid: key.pid,
             created_at: key.created_at,
@@ -180,35 +212,39 @@ impl Targets {
         if self.is_self(&path) {
             return None;
         }
-        let group = self
-            .engine
-            .decide(&NormalizedProcess::new("", &path))
-            .group()?;
-        u16::try_from(group).ok()
+        match self.engine.decide(&NormalizedProcess::new("", &path)) {
+            Decision::Group(g) => u16::try_from(g).ok(),
+            Decision::Excluded => None,
+            Decision::Direct => self.inherited(key, depth),
+        }
+    }
+
+    /// 父进程是允许继承的目标组时，子进程归入同一组。父进程必须早于子进程创建（PID 复用时，
+    /// 查到的「父进程」其实是后来的进程，C-DRV-04）。
+    fn inherited(&self, child: ProcessKey, depth: u8) -> Option<u16> {
+        if depth >= MAX_ANCESTORS {
+            return None;
+        }
+        let ppid = process_parent_id(child.pid).ok()?;
+        let parent = ProcessKey {
+            pid: ppid,
+            created_at: process_creation_time(ppid).ok()?,
+        };
+        if parent.created_at > child.created_at {
+            return None;
+        }
+        let group = self.group_of(parent, depth + 1)?;
+        self.include_children
+            .get(usize::from(group))
+            .copied()
+            .unwrap_or(false)
+            .then_some(group)
     }
 }
 
 impl FlowPolicy for Targets {
     fn target_group(&self, p: &ProcessKey) -> Option<u16> {
-        if let Some(t) = self.read().get(p) {
-            return Some(t.group);
-        }
-        let cached = self
-            .checked
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(p)
-            .copied();
-        if let Some(decided) = cached {
-            return decided;
-        }
-        let decided = self.decide_now(*p);
-        let mut checked = self.checked.lock().unwrap_or_else(PoisonError::into_inner);
-        if checked.len() >= CHECKED_LIMIT {
-            checked.clear();
-        }
-        checked.insert(*p, decided);
-        decided
+        self.group_of(*p, 0)
     }
 }
 
@@ -511,7 +547,12 @@ mod tests {
     }
 
     fn targets(p: &Profile, self_paths: &[String]) -> Targets {
-        Targets::new(RuleEngine::compile(p).expect("compile"), self_paths)
+        let inherit = p.groups.iter().map(|g| g.include_children).collect();
+        Targets::new(
+            RuleEngine::compile(p).expect("compile"),
+            inherit,
+            self_paths,
+        )
     }
 
     #[test]
@@ -551,6 +592,92 @@ mod tests {
             path: Some(exe),
         }]);
         assert_eq!(t.name_of(&key), None);
+    }
+
+    fn system_exe(name: &str) -> String {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        format!(r"{root}\System32\{name}")
+    }
+
+    /// 按 cmd.exe 完整路径命中的方案；`exclude_ping` 时排除 PING.EXE。
+    fn cmd_profile(include_children: bool, exclude_ping: bool) -> Profile {
+        let mut p = sample("p1", "x");
+        p.groups[0].include_children = include_children;
+        p.groups[0].matchers[0].kind = procroute_proto::profile::MatchType::Path;
+        p.groups[0].matchers[0].value = system_exe("cmd.exe");
+        if exclude_ping {
+            p.exclude.push(procroute_proto::profile::MatchRule {
+                kind: procroute_proto::profile::MatchType::Name,
+                value: "PING.EXE".into(),
+                recursive: false,
+            });
+        }
+        p
+    }
+
+    /// 结束时连同拉起的 ping 一起结束的 cmd 进程。
+    struct Cmd {
+        child: std::process::Child,
+        ping: Option<u32>,
+    }
+
+    impl Drop for Cmd {
+        fn drop(&mut self) {
+            if let Some(pid) = self.ping {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/PID", &pid.to_string()])
+                    .output();
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// 起 `cmd /c ping`，返回 cmd 进程与它拉起的 ping 的身份。
+    fn cmd_with_ping_child() -> (Cmd, ProcessKey) {
+        use procroute_intercept::divert::socket::ProcessResolver;
+        let child = std::process::Command::new(system_exe("cmd.exe"))
+            .args(["/c", "ping", "-n", "10", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cmd");
+        let mut cmd = Cmd { child, ping: None };
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let child = procroute_platform_win::process::list_processes()
+                .expect("snapshot")
+                .into_iter()
+                .find(|e| {
+                    e.parent_pid == cmd.child.id() && e.name.eq_ignore_ascii_case("PING.EXE")
+                });
+            if let Some(child) = child {
+                cmd.ping = Some(child.pid);
+                let key = SystemProcesses.resolve(child.pid).expect("resolve ping");
+                return (cmd, key);
+            }
+            assert!(Instant::now() < deadline, "cmd never started ping");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn children_of_a_target_inherit_it_before_tracking_reports_them() {
+        // F7：启动器刚拉起的子进程，追踪还没报到就连接
+        let t = targets(&cmd_profile(true, false), &[]);
+        let (cmd, ping) = cmd_with_ping_child();
+        let decided = t.target_group(&ping);
+        drop(cmd);
+        assert_eq!(decided, Some(0));
+    }
+
+    #[test]
+    fn children_do_not_inherit_when_the_group_says_no_or_they_are_excluded() {
+        let no_inherit = targets(&cmd_profile(false, false), &[]);
+        let excluded = targets(&cmd_profile(true, true), &[]);
+        let (cmd, ping) = cmd_with_ping_child();
+        let decisions = (no_inherit.target_group(&ping), excluded.target_group(&ping));
+        drop(cmd);
+        assert_eq!(decisions, (None, None));
     }
 
     #[test]

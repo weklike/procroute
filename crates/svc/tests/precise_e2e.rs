@@ -10,7 +10,8 @@
 //! - 本测试进程（非目标）访问同一地址不经过节点；
 //! - 停止会话后 `curl` 不再经过节点；
 //! - UDP（T-091）：`powershell.exe` 发往文档用地址的数据报经 UDP 中继 → sing-box → 节点的 UDP ASSOCIATE，
-//!   节点的回包注入回应用。
+//!   节点的回包注入回应用；
+//! - 子进程（F7）：方案只命中一个启动器（cmd.exe 的副本），它拉起后立即连接的 `curl` 同样经过节点。
 #![cfg(all(windows, feature = "vm-tests"))]
 
 use std::fs::{File, OpenOptions};
@@ -449,4 +450,38 @@ fn target_udp_reaches_the_node_and_the_reply_comes_back() {
             .filter(|t| t.starts_with("udp "))
             .count()
     );
+}
+
+/// 「启动器」：复制一份 cmd.exe。测试程序本身经 run.ps1 的 `cmd.exe /c` 启动，是系统 cmd.exe 的后代，
+/// 方案若命中系统 cmd.exe，测试进程也会继承成目标；换个路径的副本就只有它拉起的进程是后代。
+fn launcher_exe() -> PathBuf {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let launcher = std::env::temp_dir().join("procroute-e2e-launcher.exe");
+    std::fs::copy(format!(r"{root}\System32\cmd.exe"), &launcher).expect("copy cmd.exe");
+    launcher
+}
+
+#[test]
+fn a_child_connecting_right_after_start_inherits_the_target() {
+    // F7：方案只命中启动器；它拉起的 curl 一启动就连接，进程追踪（ETW）还没报到，靠当场的继承判定
+    let node = Node::start();
+    let launcher = launcher_exe();
+    let (_service, mut c) = start_session(&node, &launcher.to_string_lossy());
+    let url = format!("http://{TEST_NET}:{TARGET_PORT}/child");
+    let out = Command::new(&launcher)
+        .args(["/c", &curl_exe(), "-s", "-m", "10", &url])
+        .output()
+        .expect("run the launcher");
+    let body = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        body,
+        format!("procroute-e2e {TEST_NET}:{TARGET_PORT}"),
+        "the child went through the node"
+    );
+    // 测试进程直接运行的 curl 不是启动器的后代：不经过节点
+    let direct = curl();
+    assert!(!direct.starts_with("procroute-e2e"), "{direct}");
+    assert_eq!(node.targets().len(), 1, "{:?}", node.targets());
+    let stopped = c.call("session.stop", json!({}));
+    assert_eq!(stopped["state"], "stopped");
 }

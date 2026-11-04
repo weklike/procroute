@@ -175,7 +175,8 @@ async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSessi
         RuleEngine::compile(p)
             .map_err(|e| IpcError::new(ErrorCode::ProfileInvalidSchema, e.to_string()))
     };
-    let targets = Arc::new(Targets::new(engine(profile)?, &config.self_paths));
+    let inherit = profile.groups.iter().map(|g| g.include_children).collect();
+    let targets = Arc::new(Targets::new(engine(profile)?, inherit, &config.self_paths));
     let watch_engine = engine(profile)?;
     let epoch = svc.epoch.fetch_add(1, Ordering::SeqCst) + 1;
     svc.hub.update_session(|s| *s = starting(profile));
