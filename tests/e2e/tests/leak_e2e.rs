@@ -8,14 +8,15 @@
 #![cfg(all(windows, feature = "vm-tests"))]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use procroute_e2e::harness::{
     Client, Echo, EchoRun, Node, Reply, Service, TEST_NET, echo_target_exe, finish_echo,
-    install_dir, launcher_exe, record, start_session,
+    install_dir, launcher_exe, record, start_session, start_session_with,
 };
-use procroute_e2e::leak_detector::{Detector, Report, TCP, UDP};
+use procroute_e2e::leak_detector::{Detector, Flow, Report, TCP, UDP};
+use procroute_proto::profile::{FailPolicy, Mode, Profile};
 use serde_json::json;
 
 const TCP_PORT: u16 = 8080;
@@ -24,6 +25,10 @@ const UDP_PORT: u16 = 5353;
 const BYSTANDER_PORT: u16 = 8081;
 /// 只在「代理地址不算泄漏」里用的第二个公网地址（TEST-NET-2）。
 const OTHER_NET: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
+const ICMP: u8 = 1;
+/// 留给实验用的协议号（RFC 3692）：代表拦截层不认识的协议。
+const EXPERIMENTAL_PROTOCOL: u8 = 253;
+const SYSTEM_PID: u32 = 4;
 
 fn tcp_echo(rounds: u32, bytes: usize, timeout: Duration) -> Echo {
     Echo {
@@ -353,52 +358,265 @@ fn datagrams_larger_than_the_mtu_go_through_the_session() {
     assert_attribution_within_baseline(&service);
 }
 
+fn system32(file: &str) -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    format!(r"{root}\System32\{file}")
+}
+
+fn powershell_exe() -> String {
+    system32(r"WindowsPowerShell\v1.0\powershell.exe")
+}
+
+/// 用系统 ping 接口发一个回显请求。回显没有人应答，退出码只对回环有意义。
+fn system_ping(to: IpAddr) -> Output {
+    Command::new(system32("PING.EXE"))
+        .args(["-n", "1", "-w", "300", &to.to_string()])
+        .output()
+        .expect("run ping")
+}
+
+/// PowerShell 开一个原始套接字往 [`TEST_NET`] 发一个包。返回进程号与它有没有报错。
+fn raw_socket_send(protocol: u8) -> (u32, bool) {
+    let script = format!(
+        "$s = New-Object Net.Sockets.Socket([Net.Sockets.AddressFamily]::InterNetwork, \
+         [Net.Sockets.SocketType]::Raw, [Net.Sockets.ProtocolType]{protocol}); \
+         $b = [byte[]](8,0,0xF7,0xFF,0,0,0,0); \
+         $e = New-Object Net.IPEndPoint([Net.IPAddress]::Parse('{TEST_NET}'), 0); \
+         [void]$s.SendTo($b, $e); $s.Close()"
+    );
+    let mut child = Command::new(powershell_exe())
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("run powershell");
+    let pid = child.id();
+    let ok = child.wait().expect("wait for powershell").success();
+    (pid, ok)
+}
+
+/// 发往 [`TEST_NET`] 的 ICMP 流。
+fn icmp_flows(report: &Report) -> Vec<Flow> {
+    report
+        .flows_to(TEST_NET.into())
+        .into_iter()
+        .filter(|f| f.protocol == ICMP)
+        .collect()
+}
+
+fn assert_detector_saw_the_bystander(report: &Report) {
+    let me = std::process::id();
+    assert!(
+        report
+            .flows_to(TEST_NET.into())
+            .iter()
+            .any(|f| f.owner == Some(me) && f.remote_port == Some(BYSTANDER_PORT)),
+        "the detector never saw the bystander: {:?}",
+        report.flows
+    );
+}
+
+/// 只命中 PowerShell 的方案。测试程序经 run.ps1 启动，是 PowerShell 的后代，所以不能开继承。
+fn powershell_only(p: &mut Profile) {
+    p.groups[0].include_children = false;
+}
+
 #[test]
 fn icmp_is_attributed_to_whoever_the_system_reports() {
-    // 拦截层不处理 ICMP（TASKS.md 的已知缺口），这里确认检测器如实报出来：`ping.exe` 走系统接口，事件和包都归
-    // System；进程自己开原始套接字发的，归进程自己
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    // 没有会话时确认检测器如实报出来：`ping.exe` 走系统接口，事件和包都归 System；进程自己开原始套接字发的，
+    // 归进程自己
     let d = detector();
-    let mut ping = Command::new(format!(r"{root}\System32\PING.EXE"))
+    let mut ping = Command::new(system32("PING.EXE"))
         .args(["-n", "1", "-w", "300", &TEST_NET.to_string()])
         .stdout(Stdio::null())
         .spawn()
         .expect("run ping");
     let ping_pid = ping.id();
     let _ = ping.wait();
-    let script = format!(
-        "$s = New-Object Net.Sockets.Socket([Net.Sockets.AddressFamily]::InterNetwork, \
-         [Net.Sockets.SocketType]::Raw, [Net.Sockets.ProtocolType]::Icmp); \
-         $b = [byte[]](8,0,0xF7,0xFF,0,0,0,0); \
-         $e = New-Object Net.IPEndPoint([Net.IPAddress]::Parse('{TEST_NET}'), 0); \
-         [void]$s.SendTo($b, $e); $s.Close()"
-    );
-    let mut raw = Command::new(format!(
-        r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"
-    ))
-    .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-    .stdout(Stdio::null())
-    .spawn()
-    .expect("run powershell");
-    let raw_pid = raw.id();
-    assert!(raw.wait().expect("wait").success(), "the raw socket failed");
+    let (raw_pid, sent) = raw_socket_send(ICMP);
+    assert!(sent, "the raw socket failed");
     let report = d.finish().expect("the detector was working");
 
-    let icmp: Vec<_> = report
-        .flows_to(TEST_NET.into())
-        .into_iter()
-        .filter(|f| f.protocol == 1)
-        .collect();
+    let icmp = icmp_flows(&report);
     assert!(
         icmp.iter().any(|f| f.owner == Some(raw_pid)),
         "the raw socket's echo: {icmp:?}"
     );
     assert!(
-        icmp.iter().any(|f| f.owner == Some(4)),
+        icmp.iter().any(|f| f.owner == Some(SYSTEM_PID)),
         "the ping API's echo goes out as System: {icmp:?}"
     );
     assert!(
         icmp.iter().all(|f| f.owner != Some(ping_pid)),
         "ping.exe itself is never reported: {icmp:?}"
+    );
+}
+
+#[test]
+fn block_sessions_stop_the_other_protocols_of_targets() {
+    // C-NET-07：目标进程的原始套接字，ICMP 和拦截层不认识的协议都发不出去
+    let d = detector();
+    let node = Node::start(Reply::Echo);
+    let (service, mut c) = start_session_with(&node, &powershell_exe(), powershell_only);
+    let (icmp, _) = raw_socket_send(ICMP);
+    let (other, _) = raw_socket_send(EXPERIMENTAL_PROTOCOL);
+    // 非目标进程不受影响（C-NET-02）：开关没开，系统 ping 接口的包照常发出
+    let ping = system_ping(TEST_NET.into());
+    bystander_connect();
+    let report = d.finish().expect("the detector was working");
+    c.stop_session();
+    record(
+        "block_raw_sockets",
+        &format!(
+            "raw pids {icmp} {other}\n{}\n{report:#?}",
+            String::from_utf8_lossy(&ping.stdout)
+        ),
+    );
+
+    assert_no_leak(&report, &[icmp, other]);
+    assert!(
+        report
+            .flows_to(TEST_NET.into())
+            .iter()
+            .all(|f| f.protocol != EXPERIMENTAL_PROTOCOL),
+        "{:?}",
+        report.flows
+    );
+    assert!(
+        icmp_flows(&report)
+            .iter()
+            .any(|f| f.owner == Some(SYSTEM_PID)),
+        "ping from a non-target must still leave: {:?}",
+        report.flows
+    );
+    assert_detector_saw_the_bystander(&report);
+    assert_attribution_within_baseline(&service);
+}
+
+#[test]
+fn allow_sessions_leave_raw_sockets_alone() {
+    // `allow` 是用户选择的放行（C-NET-07）
+    let d = detector();
+    let node = Node::start(Reply::Echo);
+    let (_service, mut c) = start_session_with(&node, &powershell_exe(), |p| {
+        powershell_only(p);
+        p.fail_policy = FailPolicy::Allow;
+    });
+    let (icmp, sent) = raw_socket_send(ICMP);
+    let report = d.finish().expect("the detector was working");
+    c.stop_session();
+    assert!(sent, "the raw socket failed");
+    assert!(report.leaked_packets(&[icmp]) >= 1, "{:?}", report.flows);
+}
+
+#[test]
+fn blocking_all_ping_lasts_exactly_as_long_as_the_session() {
+    let node = Node::start(Reply::Echo);
+    let (service, mut c) = start_session_with(&node, &echo_target_exe().to_string_lossy(), |p| {
+        p.icmp.block_all_ping = true;
+    });
+
+    let d = detector();
+    let outside = system_ping(TEST_NET.into());
+    let loopback = system_ping(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let long = Duration::from_secs(5);
+    let tcp = tcp_echo(3, 1024, long).run();
+    let udp = udp_echo(3, 1000, long).run();
+    bystander_connect();
+    let during = d.finish().expect("the detector was working");
+    c.stop_session();
+
+    let d = detector();
+    let _ = system_ping(TEST_NET.into());
+    let after = d.finish().expect("the detector was working");
+    record(
+        "block_all_ping",
+        &format!(
+            "{}\n{}\n{tcp:?}\n{udp:?}\nduring {during:#?}\nafter {after:#?}",
+            String::from_utf8_lossy(&outside.stdout),
+            String::from_utf8_lossy(&loopback.stdout),
+        ),
+    );
+
+    // 会话期间：发不出去，别的都不受影响
+    assert!(icmp_flows(&during).is_empty(), "{:?}", during.flows);
+    assert!(
+        loopback.status.success(),
+        "loopback ping: {}",
+        String::from_utf8_lossy(&loopback.stdout)
+    );
+    assert!(tcp.ok, "TCP echo: {}", tcp.output);
+    assert!(udp.ok, "UDP echo: {}", udp.output);
+    assert_no_leak(&during, &[tcp.pid, udp.pid]);
+    assert_detector_saw_the_bystander(&during);
+    assert_attribution_within_baseline(&service);
+    // 会话结束：恢复
+    assert!(
+        !icmp_flows(&after).is_empty(),
+        "ping is still blocked: {:?}",
+        after.flows
+    );
+}
+
+#[test]
+fn a_killed_service_leaves_no_ping_filter_behind() {
+    // C-NET-06：服务崩溃后 3 秒内撤销全部过滤器
+    let node = Node::start(Reply::Echo);
+    let (service, c) = start_session_with(&node, &echo_target_exe().to_string_lossy(), |p| {
+        p.icmp.block_all_ping = true;
+    });
+    let d = detector();
+    let _ = system_ping(TEST_NET.into());
+    let during = d.finish().expect("the detector was working");
+    assert!(icmp_flows(&during).is_empty(), "{:?}", during.flows);
+
+    drop(c);
+    drop(service);
+    let d = detector();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let _ = system_ping(TEST_NET.into());
+    }
+    let after = d.finish().expect("the detector was working");
+    assert!(
+        !icmp_flows(&after).is_empty(),
+        "ping is still blocked 3 seconds after the service died: {:?}",
+        after.flows
+    );
+}
+
+#[test]
+fn blocking_all_ping_also_works_in_tun_mode() {
+    // 过滤器与模式无关。顺带确认收窄令牌之后 TUN 网卡确实建得起来（地址取自 `config_gen::TUN_ADDRESSES`）
+    let node = Node::start(Reply::Echo);
+    let (service, mut c) = start_session_with(&node, &echo_target_exe().to_string_lossy(), |p| {
+        p.mode = Mode::Tun;
+        p.fail_policy = FailPolicy::Allow;
+        p.icmp.block_all_ping = true;
+    });
+    let adapters = Command::new(system32("ipconfig.exe"))
+        .arg("/all")
+        .output()
+        .expect("run ipconfig");
+    let adapters = String::from_utf8_lossy(&adapters.stdout).into_owned();
+    let d = detector();
+    let _ = system_ping(TEST_NET.into());
+    let during = d.finish().expect("the detector was working");
+    c.stop_session();
+    let d = detector();
+    let _ = system_ping(TEST_NET.into());
+    let after = d.finish().expect("the detector was working");
+    drop(service);
+    record("block_all_ping_tun", &adapters);
+
+    assert!(
+        adapters.contains("198.18.0.1"),
+        "no TUN adapter: {adapters}"
+    );
+    assert!(icmp_flows(&during).is_empty(), "{:?}", during.flows);
+    assert!(
+        !icmp_flows(&after).is_empty(),
+        "ping is still blocked: {:?}",
+        after.flows
     );
 }
