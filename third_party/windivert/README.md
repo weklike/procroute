@@ -37,6 +37,10 @@
 服务只从安装目录加载 `WinDivert.dll`，加载前按编译进来的锁校验 DLL 与驱动文件的 SHA256；
 驱动由 `WinDivertOpen` 安装和加载，加载期间禁止删除或替换 `.sys`（C-DRV-02）。
 
+打包（`cargo xtask bundle`，T-110）把 `WinDivert.dll` 与 `WinDivert64.sys` 原样装进安装目录、**不重新签名**
+（C-DRV-01）：`xtask/bundle/sign.ps1` 明确跳过锁定的第三方二进制，签名会改变哈希，服务就会拒绝加载。
+`LICENSE` 装到安装目录的 `licenses\WinDivert-LICENSE`。卸载时服务先停止，WinDivert 句柄关闭、过滤器随之撤销。
+
 ## 升级流程
 
 与 sing-box 相同（`third_party/sing-box/README.md`）：单独提 PR，只改本目录的版本锁与本文件的核对记录
