@@ -3,19 +3,6 @@
 
 Windows 优先的进程级代理客户端：只让指定的进程（及其子进程）走代理，其余流量完全不受影响。
 
-## 下载
-
-从 [Releases](https://github.com/weklike/procroute/releases) 下载 `ProcRoute_<版本>_x64-setup.exe` 并运行，支持 Windows 10 22H2 及以上、Windows 11（x64）。
-安装包用临时生成的自签名证书签名，Windows 会提示「未知发布者」，SmartScreen 拦截时点「更多信息 → 仍要运行」，不需要安装任何证书。
-每个 Release 都附有校验和与构建来源证明（[原因](./docs/adr/0002-release-signing-same-certificate.md)）。
-
-## 开发
-
-- 开发约定：[`AGENTS.md`](./AGENTS.md)
-- 硬性约束：[`CONSTRAINTS.md`](./CONSTRAINTS.md)
-- 任务清单：[`TASKS.md`](./TASKS.md)
-- Windows 开发机配置：[`scripts/setup-windows-dev.ps1`](./scripts/setup-windows-dev.ps1)
-=======
 选中游戏或软件 → 一键启动 → 只有它走代理：TCP、UDP 都管，DNS 不泄漏，不改系统路由。
 
 ## 两种工作模式
@@ -51,7 +38,7 @@ v1.0 的 8 条 P0 功能均已实现，并在 Windows Sandbox 中端到端验证
 - 会话进行中修改节点后，排除表不会自动更新，需要重新启动会话。
 - TUN 模式下「包含子进程」不生效（sing-box 只按发起连接的进程判定）。
 - 不支持 Clash / mihomo 的 YAML 订阅；暂时不能从文件对话框添加进程（可以从运行中的进程列表添加）。
-- 安装器用本机自签名证书签名，**只适用于构建它的这台机器**（见下文）；正式发布需要正式的代码签名证书。
+- 安装器用每次打包临时生成的自签名证书签名，Windows 会提示「未知发布者」，SmartScreen 可能拦截；要消除提示需要公共信任的代码签名证书（[ADR 0002](./docs/adr/0002-release-signing-same-certificate.md)）。
 - 逐包统计的泄漏检测器（T-080）与自动更新（T-111）尚未实现。
 
 完整进度与每项实现的取舍见 [`TASKS.md`](./TASKS.md)。
@@ -62,30 +49,31 @@ v1.0 的 8 条 P0 功能均已实现，并在 Windows Sandbox 中端到端验证
 - 管理员权限（安装服务与加载 WinDivert 驱动时需要；日常使用界面不需要）；
 - WebView2 运行时（Windows 11 自带；没有时安装器会下载引导程序）。
 
-## 在本机安装
+## 下载与安装
 
-安装器在本机构建，用一张只在这台机器上使用的自签名证书签名。服务以 LocalSystem 运行，会校验界面程序的签名，签名主体必须与服务一致（C-SEC-02），否则拒绝连接。
-
-1. 构建（需要先配好开发环境，见「开发」）：
-
-   ```powershell
-   cargo xtask fetch-deps   # 拉取并校验锁定版本的 sing-box 与 WinDivert
-   cargo xtask bundle       # 输出到 target\bundle\
-   ```
-
-   第一次运行时，会在当前用户的证书库里创建代码签名证书 `CN=ProcRoute Local Code Signing`（私钥不可导出）。
-
-2. **以管理员身份**运行一次 `target\bundle\trust-signing-cert.ps1`，把这张证书加入本机「受信任的根证书颁发机构」。
-   这一步会让本机信任这张证书签的任何程序；撤销方法：`certlm.msc` →「受信任的根证书颁发机构」→ 删除该证书。
-   安装器本身不改动证书信任。
-
-3. 运行 `target\bundle\ProcRoute_<版本>_x64-setup.exe`。安装器会：
+1. 从 [Releases](https://github.com/weklike/procroute/releases) 下载 `ProcRoute_<版本>_x64-setup.exe`。目前的版本都是预发布，不会显示为 Latest，请在列表里找。
+2. 运行安装器。Windows 会提示「未知发布者」，SmartScreen 拦截时点「更多信息 → 仍要运行」。**不需要安装任何证书。**安装器会：
    - 把界面、服务、sing-box、WinDivert 装到 `C:\Program Files\ProcRoute`；
    - 登记并启动 Windows 服务 `ProcRoute`（LocalSystem，开机自动启动，异常退出 5 秒后重启）。
 
+每个 Release 都附有 `SHA256SUMS.txt` 与构建来源证明，可以确认安装包由本仓库的 GitHub Actions 从对应的源码构建：
+
+```powershell
+gh attestation verify ProcRoute_<版本>_x64-setup.exe --repo weklike/procroute
+```
+
+服务以 LocalSystem 运行，只接受安装目录内、与服务用同一张证书签名的界面程序（C-SEC-02），其他程序一律拒绝连接。安装包的证书每次打包临时生成，用完连同私钥删除，所以没有人能再用它签出被接受的程序（[ADR 0002](./docs/adr/0002-release-signing-same-certificate.md)）。
+
+自己构建（需要先配好开发环境，见「开发」）：
+
+```powershell
+cargo xtask fetch-deps   # 拉取并校验锁定版本的 sing-box 与 WinDivert
+cargo xtask bundle       # 输出到 target\bundle\
+```
+
 **卸载**：从「设置 → 应用」或开始菜单卸载。卸载会停止并删除服务；服务退出时 WinDivert 过滤器随之撤销，不留路由或防火墙规则。配置目录 `%ProgramData%\ProcRoute`（方案、节点、日志）会保留，需要时手动删除。
 
-**升级**：重新构建后直接运行新的安装器，它会先停止服务再覆盖文件。
+**升级**：直接运行新版本的安装器，它会先停止服务再覆盖文件。目前没有自动更新。
 
 ## 使用
 
@@ -132,12 +120,16 @@ $env:VITE_IPC_MOCK='1'; pnpm -C app exec tauri dev   # 桌面外壳 + 模拟服�
 ```powershell
 cargo xtask sandbox-test [--only <测试名>]   # 驱动、WFP、ETW 测试，以及精确模式的端到端测试 precise_e2e
 cargo xtask sandbox-dev                      # 在沙盒里运行真实的服务与界面，供手动联调（沙盒保持打开）
-cargo xtask sandbox-install                  # 在沙盒里验证安装器：安装、服务与界面、卸载后无残留
+cargo xtask sandbox-install                  # 在沙盒里验证安装器：安装、服务与界面、伪造界面被拒绝、卸载后无残留
 ```
 
 `precise_e2e` 不需要外网：测试自己起一个 SOCKS5 节点作为「远端代理」，验证目标进程的 TCP、UDP 与子进程经过节点，非目标进程与停止会话后不经过。
 
 提交前必须通过的检查见 [`AGENTS.md`](./AGENTS.md) 第 3.3 节。
+
+### 发版
+
+在 GitHub 上发布 Release，tag 形如 `v1.2.3`。工作流会跑 CI，按 tag 打包并上传安装器、校验和与构建证明，不需要任何密钥。详见 [`AGENTS.md`](./AGENTS.md) 第 3.2 节。
 
 ## 许可证
 
