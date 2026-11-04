@@ -8,7 +8,7 @@
 #![cfg(all(windows, feature = "vm-tests"))]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use procroute_e2e::harness::{
@@ -351,4 +351,54 @@ fn datagrams_larger_than_the_mtu_go_through_the_session() {
         "{targets:?}"
     );
     assert_attribution_within_baseline(&service);
+}
+
+#[test]
+fn icmp_is_attributed_to_whoever_the_system_reports() {
+    // 拦截层不处理 ICMP（TASKS.md 的已知缺口），这里确认检测器如实报出来：`ping.exe` 走系统接口，事件和包都归
+    // System；进程自己开原始套接字发的，归进程自己
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let d = detector();
+    let mut ping = Command::new(format!(r"{root}\System32\PING.EXE"))
+        .args(["-n", "1", "-w", "300", &TEST_NET.to_string()])
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("run ping");
+    let ping_pid = ping.id();
+    let _ = ping.wait();
+    let script = format!(
+        "$s = New-Object Net.Sockets.Socket([Net.Sockets.AddressFamily]::InterNetwork, \
+         [Net.Sockets.SocketType]::Raw, [Net.Sockets.ProtocolType]::Icmp); \
+         $b = [byte[]](8,0,0xF7,0xFF,0,0,0,0); \
+         $e = New-Object Net.IPEndPoint([Net.IPAddress]::Parse('{TEST_NET}'), 0); \
+         [void]$s.SendTo($b, $e); $s.Close()"
+    );
+    let mut raw = Command::new(format!(
+        r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"
+    ))
+    .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+    .stdout(Stdio::null())
+    .spawn()
+    .expect("run powershell");
+    let raw_pid = raw.id();
+    assert!(raw.wait().expect("wait").success(), "the raw socket failed");
+    let report = d.finish().expect("the detector was working");
+
+    let icmp: Vec<_> = report
+        .flows_to(TEST_NET.into())
+        .into_iter()
+        .filter(|f| f.protocol == 1)
+        .collect();
+    assert!(
+        icmp.iter().any(|f| f.owner == Some(raw_pid)),
+        "the raw socket's echo: {icmp:?}"
+    );
+    assert!(
+        icmp.iter().any(|f| f.owner == Some(4)),
+        "the ping API's echo goes out as System: {icmp:?}"
+    );
+    assert!(
+        icmp.iter().all(|f| f.owner != Some(ping_pid)),
+        "ping.exe itself is never reported: {icmp:?}"
+    );
 }

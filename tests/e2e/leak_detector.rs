@@ -6,7 +6,8 @@
 //!   分片与非 TCP / UDP 的包同样看得到。
 //! - **归属**：SOCKET 层的 BIND、CONNECT、ACCEPT 事件给出（协议，本地端口）→ PID。事件可能晚于第一个包
 //!   （C-NET-04），所以不在收包时判断，而是结束后按驱动打的时间戳统一配对（[`Ledger::report`]）；
-//!   目标进程由用例在事后指定。没有端口的分片跟随同一数据报的第一片。配不上的包归入 `owner: None`，不算进
+//!   目标进程由用例在事后指定。没有端口的分片跟随同一数据报的第一片，没有端口的协议（ICMP 等）按对端地址配对。
+//!   配不上的包归入 `owner: None`，不算进
 //!   任何进程，用例要另外确认发往观察地址的包都有归属。拦截层放回一个包时，WFP 会为这次注入再报一个 PID 4
 //!   （System）的 CONNECT，所以有用户进程的事件时不看 System 的，否则放回去的包都会算到 System 头上。
 //! - **独立性**：不用产品的 `packet::parse`、`ExclusionSet` 和判定逻辑，否则产品的错误也会蒙住检测器。只共用
@@ -281,11 +282,13 @@ impl Ledger {
         let mut sorted: Vec<SocketRecord> = self.sockets.clone();
         sorted.sort_by_key(|s| s.at);
         let mut by_port: HashMap<(u8, u16), Vec<SocketRecord>> = HashMap::new();
+        let mut by_remote: HashMap<(u8, IpAddr), Vec<SocketRecord>> = HashMap::new();
         for s in sorted {
             by_port
                 .entry((s.protocol, s.local_port))
                 .or_default()
                 .push(s);
+            by_remote.entry((s.protocol, s.remote)).or_default().push(s);
         }
 
         // 先走一遍首片：后面的分片可能先于首片发出（发送顺序由协议栈决定）
@@ -307,7 +310,7 @@ impl Ledger {
                 (None, Some(id)) => first_fragments
                     .get(&(p.src, p.dst, p.protocol, id))
                     .map_or((None, None), |&(owner, ports)| (owner, Some(ports))),
-                (None, None) => (None, None),
+                (None, None) => (owner_without_ports(&by_remote, p), None),
             };
             let (local_port, remote_port) = ports.unzip();
             let flow = flows
@@ -357,6 +360,16 @@ fn owner_of(
         .or_else(|| nearest(same_remote(), p.at))
         .or_else(|| nearest(candidates.iter(), p.at))
         .map(|s| s.pid)
+}
+
+/// 没有端口的协议（ICMP 等）：只能看协议与对端地址。系统 ping 接口发的包事件里是 System，原始套接字发的是进程
+/// 自己，所以这里不优先用户进程，只按时间配对。拦截层不处理这些协议，也就没有放回时的 System 回声。
+fn owner_without_ports(
+    by_remote: &HashMap<(u8, IpAddr), Vec<SocketRecord>>,
+    p: &WirePacket,
+) -> Option<u32> {
+    let candidates = by_remote.get(&(p.protocol, p.dst))?;
+    nearest(candidates.iter(), p.at).map(|s| s.pid)
 }
 
 /// 按时间排好序的事件里，不晚于这个包的最后一个；都晚于它（首包竞态）时取最早的一个。
@@ -946,6 +959,44 @@ mod tests {
         assert_eq!(r.leaked_packets(&[100]), 0);
         assert_eq!(r.flows.len(), 2);
         assert!(r.flows.iter().all(|f| f.owner.is_none()));
+    }
+
+    #[test]
+    fn protocols_without_ports_are_attributed_by_their_remote() {
+        const ICMP: u8 = 1;
+        let echo = |dst: [u8; 4]| v4(dst, ICMP, 1, 0, &[8, 0, 0, 0]);
+        let icmp_socket = |at: i64, pid: u32, remote: IpAddr| SocketRecord {
+            at,
+            pid,
+            protocol: ICMP,
+            local_port: 8,
+            remote,
+            remote_port: 0,
+        };
+        let mut l = ledger();
+        // 原始套接字：事件带进程自己的 PID
+        l.add_socket(icmp_socket(10, 100, REMOTE_IP));
+        l.add_packet(20, &echo(REMOTE));
+        // 系统 ping 接口：事件是 System
+        let other: IpAddr = "192.0.2.9".parse().expect("ip");
+        l.add_socket(icmp_socket(30, 4, other));
+        l.add_packet(40, &echo([192, 0, 2, 9]));
+        // 同一地址先后有两种发送方式：各归各的，不把 System 发的包算给后来的进程
+        let both: IpAddr = "192.0.2.10".parse().expect("ip");
+        l.add_socket(icmp_socket(41, 4, both));
+        l.add_packet(42, &echo([192, 0, 2, 10]));
+        l.add_socket(icmp_socket(43, 200, both));
+        l.add_packet(44, &echo([192, 0, 2, 10]));
+        // 没有事件的地址：不算在任何进程头上
+        l.add_packet(50, &echo([192, 0, 2, 77]));
+        // 同一地址的 TCP 事件不能用来归属 ICMP
+        l.add_socket(socket(60, 300, PORT));
+        let r = l.report().expect("report");
+        assert_eq!(r.leaked_packets(&[100]), 1);
+        assert_eq!(r.leaked_packets(&[4]), 2);
+        assert_eq!(r.leaked_packets(&[200]), 1);
+        assert_eq!(r.leaked_packets(&[300]), 0);
+        assert_eq!(r.flows.iter().filter(|f| f.owner.is_none()).count(), 1);
     }
 
     #[test]
