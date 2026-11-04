@@ -7,6 +7,8 @@
 //!   （服务、界面、sing-box）永远不是目标（C-NET-05），否则 sing-box 去代理服务器的连接会被改道成环；
 //! - 回环中继：IPv4 与（可用时）IPv6 各一个，共用一张 NAT 表，[`NatMap`] 把改道登记进去；中继只连 sing-box
 //!   的本地 SOCKS 入口，没有直连的代码路径（C-NET-03）；
+//! - UDP（T-091）：[`UdpBridge`] 把拦截层交来的数据报送进 UDP 中继（每个会话一个 SOCKS5 UDP ASSOCIATE），
+//!   中继的回包交回拦截层注入；
 //! - 拦截后端经 [`BackendFactory`] 创建：正式实现是 WinDivert，测试里换成假后端（开发机上不加载驱动）；
 //! - 后端的流事件转成连接面板的事件。只有被改道的连接会出现（C-NET-02）。
 
@@ -21,6 +23,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use procroute_intercept::divert::network::{RedirectMap, Relays};
 use procroute_intercept::divert::socket::SystemProcesses;
+use procroute_intercept::divert::udp::{UdpForward, UdpReplies};
 use procroute_intercept::divert::{DivertConfig, DivertInterceptor};
 use procroute_intercept::{FlowEvent, FlowPolicy, Interceptor, ProcessKey};
 use procroute_platform_win::secret::Secret;
@@ -31,6 +34,7 @@ use procroute_relay::nat::{NatEntry, NatTable};
 use procroute_relay::tcp::{
     DEFAULT_CONNECT_TIMEOUT, SharedNat, SniffConfig, TcpRelay, TcpRelayConfig,
 };
+use procroute_relay::udp::{Datagram, UdpRelay, UdpRelayConfig, UdpReplySink};
 use procroute_rules::engine::RuleEngine;
 use procroute_rules::matcher::NormalizedProcess;
 use procroute_rules::path::normalize_path;
@@ -45,7 +49,12 @@ const CHECKED_LIMIT: usize = 4096;
 
 /// 创建拦截后端（未启动）。
 pub trait BackendFactory: Send + Sync + 'static {
-    fn create(&self, relays: Relays, map: Arc<dyn RedirectMap>) -> Box<dyn Interceptor>;
+    fn create(
+        &self,
+        relays: Relays,
+        map: Arc<dyn RedirectMap>,
+        udp: Option<Arc<dyn UdpForward>>,
+    ) -> Box<dyn Interceptor>;
 }
 
 /// 正式实现：安装目录里按哈希锁定的 WinDivert（C-DRV-01）。
@@ -55,11 +64,17 @@ pub struct DivertFactory {
 }
 
 impl BackendFactory for DivertFactory {
-    fn create(&self, relays: Relays, map: Arc<dyn RedirectMap>) -> Box<dyn Interceptor> {
+    fn create(
+        &self,
+        relays: Relays,
+        map: Arc<dyn RedirectMap>,
+        udp: Option<Arc<dyn UdpForward>>,
+    ) -> Box<dyn Interceptor> {
         Box::new(DivertInterceptor::new(DivertConfig {
             dir: self.dir.clone(),
             relays,
             map,
+            udp,
             resolver: Arc::new(SystemProcesses),
             receivers: RECEIVERS,
         }))
@@ -308,6 +323,73 @@ impl RelaySet {
                 Err(e) => tracing::error!(error = %e, "relay task failed"),
             }
         }
+    }
+}
+
+/// 拦截层与 UDP 中继之间的桥（T-091）。
+pub struct UdpBridge {
+    relay: UdpRelay,
+    replies: ReplySlot,
+}
+
+/// 拦截层交来的回包出口：后端启动后才有，停止时撤回。
+type ReplySlot = Arc<RwLock<Option<Arc<dyn UdpReplies>>>>;
+
+impl std::fmt::Debug for UdpBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpBridge")
+            .field("sessions", &self.relay.session_count())
+            .finish_non_exhaustive()
+    }
+}
+
+/// 中继的回包交给拦截层；拦截层还没接上或已经撤回时丢弃。
+struct ReplySide(ReplySlot);
+
+impl UdpReplySink for ReplySide {
+    fn deliver(&self, session: SocketAddr, src: SocketAddr, payload: &[u8]) {
+        let replies = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        if let Some(r) = replies.as_ref() {
+            r.deliver(session, src, payload);
+        }
+    }
+}
+
+impl UdpBridge {
+    /// 建立 UDP 中继，转给 sing-box 的本地 SOCKS 入口。必须在 tokio 运行时内调用。
+    pub fn new(
+        socks: SocketAddr,
+        password: Secret<String>,
+        group_tags: Arc<[String]>,
+    ) -> Arc<Self> {
+        let replies: ReplySlot = Arc::default();
+        let relay = UdpRelay::new(
+            UdpRelayConfig::new(socks, password, group_tags),
+            Arc::new(ReplySide(Arc::clone(&replies))),
+        );
+        Arc::new(Self { relay, replies })
+    }
+
+    /// 关闭全部会话。
+    pub fn shutdown(&self) {
+        self.relay.shutdown();
+    }
+}
+
+impl UdpForward for UdpBridge {
+    fn forward(&self, session: SocketAddr, group: u16, dst: SocketAddr, payload: &[u8]) -> bool {
+        self.relay
+            .send(Datagram {
+                session,
+                group,
+                dst,
+                payload: payload.to_vec(),
+            })
+            .is_ok()
+    }
+
+    fn attach(&self, replies: Option<Arc<dyn UdpReplies>>) {
+        *self.replies.write().unwrap_or_else(PoisonError::into_inner) = replies;
     }
 }
 

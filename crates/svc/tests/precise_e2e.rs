@@ -8,12 +8,14 @@
 //!
 //! - `curl` 访问一个文档用地址，必须经 拦截 → 回环中继 → sing-box → 节点 拿到桩的响应；
 //! - 本测试进程（非目标）访问同一地址不经过节点；
-//! - 停止会话后 `curl` 不再经过节点。
+//! - 停止会话后 `curl` 不再经过节点；
+//! - UDP（T-091）：`powershell.exe` 发往文档用地址的数据报经 UDP 中继 → sing-box → 节点的 UDP ASSOCIATE，
+//!   节点的回包注入回应用。
 #![cfg(all(windows, feature = "vm-tests"))]
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +33,7 @@ const PIPE: &str = r"\\.\pipe\ProcRoute.Control";
 /// 文档用地址（TEST-NET-1）：目标进程的连接在离开本机前就被改道。
 const TEST_NET: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 const TARGET_PORT: u16 = 8080;
+const UDP_PORT: u16 = 5353;
 
 fn curl_exe() -> String {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
@@ -199,28 +202,14 @@ fn serve_socks(mut s: TcpStream, targets: &Mutex<Vec<String>>) -> std::io::Resul
     // 请求：VER CMD RSV ATYP ...
     let mut req = [0u8; 4];
     s.read_exact(&mut req)?;
-    let host = match req[3] {
-        1 => {
-            let mut ip = [0u8; 4];
-            s.read_exact(&mut ip)?;
-            Ipv4Addr::from(ip).to_string()
-        }
-        3 => {
-            let mut len = [0u8; 1];
-            s.read_exact(&mut len)?;
-            let mut name = vec![0u8; usize::from(len[0])];
-            s.read_exact(&mut name)?;
-            String::from_utf8_lossy(&name).into_owned()
-        }
-        4 => {
-            let mut ip = [0u8; 16];
-            s.read_exact(&mut ip)?;
-            format!("[{}]", std::net::Ipv6Addr::from(ip))
-        }
-        _ => return Ok(()),
+    let Some(host) = read_host(&mut s, req[3])? else {
+        return Ok(());
     };
     let mut port = [0u8; 2];
     s.read_exact(&mut port)?;
+    if req[1] == 3 {
+        return serve_udp_associate(s, targets);
+    }
     let target = format!("{host}:{}", u16::from_be_bytes(port));
     targets.lock().expect("targets").push(target.clone());
     s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])?;
@@ -241,6 +230,75 @@ fn serve_socks(mut s: TcpStream, targets: &Mutex<Vec<String>>) -> std::io::Resul
     Ok(())
 }
 
+/// SOCKS5 地址（ATYP 之后的部分，不含端口）。
+fn read_host(r: &mut impl Read, atyp: u8) -> std::io::Result<Option<String>> {
+    Ok(Some(match atyp {
+        1 => {
+            let mut ip = [0u8; 4];
+            r.read_exact(&mut ip)?;
+            Ipv4Addr::from(ip).to_string()
+        }
+        3 => {
+            let mut len = [0u8; 1];
+            r.read_exact(&mut len)?;
+            let mut name = vec![0u8; usize::from(len[0])];
+            r.read_exact(&mut name)?;
+            String::from_utf8_lossy(&name).into_owned()
+        }
+        4 => {
+            let mut ip = [0u8; 16];
+            r.read_exact(&mut ip)?;
+            format!("[{}]", Ipv6Addr::from(ip))
+        }
+        _ => return Ok(None),
+    }))
+}
+
+/// UDP ASSOCIATE：在回环上开一个 UDP 端口，收到的每个数据报回一个 `pong udp <目标>`，「来自」那个目标。
+/// 控制连接关闭即结束。
+fn serve_udp_associate(control: TcpStream, targets: &Mutex<Vec<String>>) -> std::io::Result<()> {
+    let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+    udp.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let port = udp.local_addr()?.port().to_be_bytes();
+    let mut control = control;
+    control.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, port[0], port[1]])?;
+    control.set_nonblocking(true)?;
+    let mut buf = [0u8; 2048];
+    loop {
+        // 控制连接被对方关闭：关联结束
+        match control.peek(&mut [0u8; 1]) {
+            Ok(0) => return Ok(()),
+            Err(e) if e.kind() != ErrorKind::WouldBlock => return Ok(()),
+            _ => {}
+        }
+        let (n, from) = match udp.recv_from(&mut buf) {
+            Ok(x) => x,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => continue,
+            Err(e) => return Err(e),
+        };
+        // RSV(2) FRAG(1) ATYP ADDR PORT DATA
+        if n < 4 {
+            continue;
+        }
+        let mut r = &buf[4..n];
+        let Some(host) = read_host(&mut r, buf[3])? else {
+            continue;
+        };
+        let mut port = [0u8; 2];
+        r.read_exact(&mut port)?;
+        let target = format!("{host}:{}", u16::from_be_bytes(port));
+        targets
+            .lock()
+            .expect("targets")
+            .push(format!("udp {target}"));
+        // 回包的头与请求相同：地址字段就是回包的来源（那个目标）
+        let header_len = n - r.len();
+        let mut reply = buf[..header_len].to_vec();
+        reply.extend_from_slice(format!("pong udp {target}").as_bytes());
+        udp.send_to(&reply, from)?;
+    }
+}
+
 /// 用 curl 访问文档用地址，返回响应体（失败时为空）。
 fn curl() -> String {
     let out = Command::new(curl_exe())
@@ -255,7 +313,27 @@ fn curl() -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-fn profile(node_id: &str) -> Profile {
+fn powershell_exe() -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe")
+}
+
+/// 用 PowerShell 发一个 UDP 数据报到文档用地址并等回包，返回回包内容（超时为空）。
+fn powershell_udp() -> String {
+    let script = format!(
+        "$u = New-Object System.Net.Sockets.UdpClient; $u.Client.ReceiveTimeout = 10000; \
+         $b = [Text.Encoding]::ASCII.GetBytes('ping'); [void]$u.Send($b, $b.Length, '{TEST_NET}', {UDP_PORT}); \
+         $ep = New-Object System.Net.IPEndPoint([Net.IPAddress]::Any, 0); \
+         try {{ $r = $u.Receive([ref]$ep); [Text.Encoding]::ASCII.GetString($r) + ' from ' + $ep }} catch {{ 'timeout' }}"
+    );
+    let out = Command::new(powershell_exe())
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .expect("run powershell.exe");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn profile(node_id: &str, exe: &str) -> Profile {
     Profile {
         schema_version: PROFILE_SCHEMA_VERSION,
         id: "e2e-precise".into(),
@@ -270,7 +348,7 @@ fn profile(node_id: &str) -> Profile {
             include_children: true,
             matchers: vec![MatchRule {
                 kind: MatchType::Path,
-                value: curl_exe(),
+                value: exe.into(),
                 recursive: false,
             }],
         }],
@@ -278,28 +356,42 @@ fn profile(node_id: &str) -> Profile {
     }
 }
 
-#[test]
-fn a_target_process_reaches_the_node_through_the_whole_path() {
-    let node = Node::start();
-    let _service = Service::start();
+/// 起服务、导入指向 `node` 的节点、保存按 `exe` 命中的方案并启动会话。
+fn start_session(node: &Node, exe: &str) -> (Service, Client) {
+    let service = Service::start();
     let mut c = Client::connect();
-
     c.call(
         "node.import",
         json!({ "kind": "share_links", "text": format!("socks5://{}#e2e-node", node.addr) }),
     );
+    // 配置目录在多个测试之间保留：按地址找这次的节点
     let nodes = c.call("node.list", json!({}));
-    let node_id = nodes["nodes"][0]["id"]
-        .as_str()
-        .expect("node id")
+    let node_id = nodes["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|n| n["server"] == node.addr.to_string())
+        .and_then(|n| n["id"].as_str())
+        .expect("the imported node")
         .to_owned();
-    let p = profile(&node_id);
+    let p = profile(&node_id, exe);
     c.call("profile.save", serde_json::to_value(&p).expect("profile"));
-    let status = c
-        .try_call("session.start", json!({ "profile_id": p.id }))
-        .unwrap_or_else(|e| panic!("session.start failed: {e} (see svc-e2e.log)"));
+    let started = c.try_call("session.start", json!({ "profile_id": p.id }));
+    assert!(
+        started.is_ok(),
+        "session.start failed: {:?} (see svc-e2e.log)",
+        started.as_ref().err()
+    );
+    let status = started.unwrap_or_default();
     assert_eq!(status["state"], "running", "{status}");
     assert_eq!(status["components"]["driver"], "active", "{status}");
+    (service, c)
+}
+
+#[test]
+fn a_target_process_reaches_the_node_through_the_whole_path() {
+    let node = Node::start();
+    let (_service, mut c) = start_session(&node, &curl_exe());
 
     // 目标进程：经整条链路到达节点
     let target = format!("{TEST_NET}:{TARGET_PORT}");
@@ -324,4 +416,37 @@ fn a_target_process_reaches_the_node_through_the_whole_path() {
     let after = curl();
     assert!(!after.starts_with("procroute-e2e"), "{after}");
     assert_eq!(node.targets().len(), 1, "{:?}", node.targets());
+}
+
+#[test]
+fn target_udp_reaches_the_node_and_the_reply_comes_back() {
+    let node = Node::start();
+    let (_service, mut c) = start_session(&node, &powershell_exe());
+
+    // 目标进程的 UDP：拦截 → UDP 中继 → sing-box → 节点的 UDP ASSOCIATE，回包注入回应用
+    let target = format!("{TEST_NET}:{UDP_PORT}");
+    let reply = powershell_udp();
+    assert!(
+        reply.starts_with(&format!("pong udp {target} from {target}")),
+        "reply seen by the app: {reply:?}; node saw {:?}",
+        node.targets()
+    );
+    assert!(node.targets().contains(&format!("udp {target}")));
+
+    let stopped = c.call("session.stop", json!({}));
+    assert_eq!(stopped["state"], "stopped");
+    // 停止之后不再经过节点
+    let before = node.targets().len();
+    let after = powershell_udp();
+    assert!(!after.starts_with("pong"), "{after}");
+    assert_eq!(
+        node.targets()
+            .iter()
+            .filter(|t| t.starts_with("udp "))
+            .count(),
+        node.targets()[..before]
+            .iter()
+            .filter(|t| t.starts_with("udp "))
+            .count()
+    );
 }

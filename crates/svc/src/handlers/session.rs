@@ -11,7 +11,7 @@
 //! - 精确进程模式（见 [`crate::precise`]）：进程追踪 → 目标集合，sing-box 的本地 SOCKS 入口，回环中继，
 //!   最后启动拦截后端。内核不在时中继对新连接回 RST，不直连（C-NET-03）。`allow` 策略下内核放弃重启时
 //!   同时撤下拦截，目标进程回到直连，与会话「已结束」的状态一致。拦截后端起不来返回 `driver.not_loaded`。
-//!   目前只改道 TCP；目标进程的 UDP 按 fail_policy 处理（T-091 之前）。
+//!   TCP 经回环中继，UDP（含 53 端口）经 UDP 中继，都转给 sing-box 的本地 SOCKS 入口。
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -44,7 +44,7 @@ use crate::fail_closed::{FailClosedGuard, GuardHandle};
 use crate::ipc_server::parse_params;
 use crate::kernel::{RunningKernel, StateCallback};
 use crate::precise::{
-    GroupLabels, NatMap, RelaySet, Targets, new_nat, resolve_servers, spawn_conn_events,
+    GroupLabels, NatMap, RelaySet, Targets, UdpBridge, new_nat, resolve_servers, spawn_conn_events,
 };
 
 /// 后端的流事件通道容量。满了丢事件并计数（拦截层不阻塞收包线程，C-CODE-05）。
@@ -68,6 +68,7 @@ pub(super) struct RunningSession {
 struct PreciseRun {
     backend: SharedBackend,
     relays: RelaySet,
+    udp: Arc<UdpBridge>,
     watcher: Watcher,
     events: Option<std::thread::JoinHandle<()>>,
 }
@@ -234,6 +235,12 @@ async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSessi
     let nat = new_nat(profile.fail_policy);
     let group_tags: Arc<[String]> = profile.groups.iter().map(|g| g.tag.clone()).collect();
     let socks = SocketAddr::from((Ipv4Addr::LOCALHOST, config.socks_port));
+    // UDP 中继（每个会话一个 SOCKS5 UDP ASSOCIATE）
+    let udp = UdpBridge::new(
+        socks,
+        config.socks_password.clone(),
+        Arc::clone(&group_tags),
+    );
     let relays =
         match RelaySet::start(socks, config.socks_password, group_tags, Arc::clone(&nat)).await {
             Ok(r) => r,
@@ -262,7 +269,11 @@ async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSessi
         policy: Arc::clone(&targets) as _,
         events: events_tx,
     };
-    let mut created = svc.backend.create(relays.relays, Arc::new(NatMap(nat)));
+    let mut created = svc.backend.create(
+        relays.relays,
+        Arc::new(NatMap(nat)),
+        Some(Arc::clone(&udp) as _),
+    );
     let started = tokio::task::spawn_blocking(move || {
         let r = created.start(ctx);
         (created, r)
@@ -301,6 +312,7 @@ async fn start_precise(svc: &Services, profile: &Profile) -> Result<RunningSessi
         precise: Some(PreciseRun {
             backend,
             relays,
+            udp,
             watcher,
             events,
         }),
@@ -398,6 +410,7 @@ async fn stop_session(running: RunningSession) {
     if let Some(p) = running.precise {
         let backend = p.backend;
         let _ = tokio::task::spawn_blocking(move || stop_backend(&backend)).await;
+        p.udp.shutdown();
         p.relays.stop().await;
         stop_watcher(p.watcher).await;
         if let Some(t) = p.events {

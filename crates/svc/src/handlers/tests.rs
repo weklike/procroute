@@ -19,6 +19,7 @@ use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::sync::watch;
 
 use procroute_intercept::divert::network::{RedirectMap, Relays};
+use procroute_intercept::divert::udp::UdpForward;
 use procroute_intercept::mock::{MockHandle, MockInterceptor};
 use procroute_intercept::{
     BypassReason, ExclusionSet, FlowKey, InterceptError, InterceptStats, Interceptor, NewFlow,
@@ -149,7 +150,13 @@ impl FakeBackends {
 }
 
 impl BackendFactory for FakeBackends {
-    fn create(&self, relays: Relays, _map: Arc<dyn RedirectMap>) -> Box<dyn Interceptor> {
+    fn create(
+        &self,
+        relays: Relays,
+        _map: Arc<dyn RedirectMap>,
+        udp: Option<Arc<dyn UdpForward>>,
+    ) -> Box<dyn Interceptor> {
+        assert!(udp.is_some(), "precise sessions always bring a UDP relay");
         if self.fail {
             self.created.lock().expect("created").push((relays, None));
             return Box::new(BrokenDriver);
