@@ -499,6 +499,17 @@ impl Echo {
             .expect("start echo_target")
     }
 
+    /// 运行放在别处的一份回显目标进程。
+    pub fn run_exe(&self, exe: &std::path::Path) -> EchoRun {
+        let child = Command::new(exe)
+            .args(self.args())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start the copy of echo_target");
+        finish_echo(child)
+    }
+
     /// 经启动器（cmd.exe 的副本）拉起，不等它结束。
     pub fn spawn_via(&self, launcher: &std::path::Path) -> Child {
         Command::new(launcher)
