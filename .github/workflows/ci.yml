@@ -8,6 +8,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 发版前由 release.yml 调用，同样的检查不通过就不打包
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
