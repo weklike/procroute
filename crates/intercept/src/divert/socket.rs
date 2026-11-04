@@ -7,7 +7,10 @@
 //!   结果登记进 [`FlowTable`]，NETWORK 层（T-075）在这条流的第一个 SYN 上查它；
 //! - 非目标流登记为 [`FlowAction::Bypass`]：只记五元组与 PID 这类归属元数据（C-NET-02 允许），让它的
 //!   第一个 SYN 立即放行，而不是当作「还没归属」暂存等待（C-NET-04）。端口被复用时新判定覆盖旧登记；
-//! - CLOSE：撤销该套接字的登记。
+//! - CLOSE：撤销该套接字的登记；
+//! - System（PID 4）的事件不处理：拦截层放回一个包时，WFP 会为这次注入再报一个 PID 4 的 CONNECT，却没有
+//!   对应的 CLOSE（2026-11-04 在沙盒中实测）。登记它会用「放行」盖掉目标流的改道登记，还会在表里留下永远
+//!   撤销不了的记录。内核自己发起的连接因此没有事件，走暂存与连接表反查（C-NET-04），第一个 SYN 最多多等 50 ms。
 //!
 //! 每条流在这里判定一次，计数器（含 `attribution_miss`）也在这里记一次。
 //!
@@ -44,6 +47,8 @@ const SHARDS: usize = 64;
 
 const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
+/// System 进程，见模块文档。
+const SYSTEM_PID: u32 = 4;
 
 /// SOCKET 层的一个事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +57,7 @@ pub enum SocketEvent {
     Close { pid: u32, key: FlowKey },
 }
 
-/// 解码 SOCKET 层地址。不是 SOCKET 层、不是 CONNECT / CLOSE、不是 TCP / UDP 时返回 `None`。
+/// 解码 SOCKET 层地址。不是 SOCKET 层、不是 CONNECT / CLOSE、不是 TCP / UDP、来自 System 时返回 `None`。
 pub fn decode(addr: &Address) -> Option<SocketEvent> {
     if addr.layer() != Layer::Socket as u8 {
         return None;
@@ -69,6 +74,9 @@ pub fn decode(addr: &Address) -> Option<SocketEvent> {
         remote: SocketAddr::new(e.remote_addr, e.remote_port),
     };
     let pid = e.process_id;
+    if pid == SYSTEM_PID {
+        return None;
+    }
     match addr.event() {
         event::SOCKET_CONNECT => Some(SocketEvent::Connect { pid, key }),
         event::SOCKET_CLOSE => Some(SocketEvent::Close { pid, key }),
