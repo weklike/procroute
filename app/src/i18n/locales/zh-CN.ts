@@ -36,7 +36,7 @@ const zhCN = {
       already_running: '会话已在运行',
       not_running: '会话没有在运行',
       fail_closed_unsupported:
-        '无法安装「阻断」策略需要的过滤规则，为避免目标进程直连，会话没有启动；可以改为「放行」或查看日志后重试',
+        '无法安装需要的过滤规则，为避免目标进程直连，会话没有启动。可以改用「放行」策略并关闭「阻断全部 ping」，或查看日志。',
     },
     profile: {
       not_found: '方案不存在',
@@ -126,6 +126,15 @@ const zhCN = {
       enabledHint: '游戏通常需要开启',
       blockQuic: '阻断 QUIC（UDP 443）',
       blockQuicHint: '让浏览器等应用回落到 TCP',
+    },
+    icmpLegend: 'ICMP',
+    icmp: {
+      blockAllPing: '会话期间阻断全部 ping',
+      blockAllPingHint: '影响本机所有程序，不只是目标进程',
+      confirmTitle: '阻断本机全部 ping？',
+      confirmBody:
+        '系统发出的 ping 分不出是哪个程序的，只能一起阻断。会话运行期间，本机所有程序都 ping 不通外部地址，用 ping 测延迟的游戏或软件可能显示超时。回环、链路本地和组播地址不受影响，停止会话后立即恢复。',
+      confirm: '确认阻断',
     },
     discard: '放弃修改',
     save: '保存方案',

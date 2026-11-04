@@ -38,7 +38,7 @@ const enUS: Messages = {
       already_running: 'A session is already running',
       not_running: 'No session is running',
       fail_closed_unsupported:
-        'The filters the "Block" failure policy needs could not be installed, so the session was not started to keep target processes from going direct; switch to "Allow" or check the logs and retry',
+        'Could not install the required filter rules, so the session was not started to keep target processes from connecting directly. Switch to the allow policy and turn off blocking all ping, or check the logs.',
     },
     profile: {
       not_found: 'Profile not found',
@@ -141,6 +141,15 @@ const enUS: Messages = {
       enabledHint: 'Usually needed for games',
       blockQuic: 'Block QUIC (UDP 443)',
       blockQuicHint: 'Makes browsers and similar apps fall back to TCP',
+    },
+    icmpLegend: 'ICMP',
+    icmp: {
+      blockAllPing: 'Block all ping during the session',
+      blockAllPingHint: 'Affects every program on this computer, not just the target processes',
+      confirmTitle: 'Block all ping on this computer?',
+      confirmBody:
+        'Ping sent through the system cannot be traced to a program, so it can only be blocked for all of them. While the session runs, no program on this computer can ping outside addresses, and games or apps that measure latency with ping may show timeouts. Loopback, link-local and multicast addresses are not affected, and ping comes back as soon as the session stops.',
+      confirm: 'Block ping',
     },
     discard: 'Discard changes',
     save: 'Save profile',

@@ -130,6 +130,37 @@ describe('ProfileEditor', () => {
     )
   })
 
+  it('asks for confirmation before blocking ping for the whole machine', async () => {
+    const user = userEvent.setup()
+    const { saveSpy } = setup((p) => ({ id: p.id }))
+    const toggle = screen.getByRole('checkbox', { name: /阻断全部 ping/ })
+    expect(toggle).not.toBeChecked()
+
+    // 取消：保持关闭
+    await user.click(toggle)
+    let dialog = await screen.findByRole('dialog', { name: '阻断本机全部 ping？' })
+    expect(dialog).toHaveTextContent('本机所有程序')
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    expect(toggle).not.toBeChecked()
+
+    // 确认：打开并存下来
+    await user.click(toggle)
+    dialog = await screen.findByRole('dialog', { name: '阻断本机全部 ping？' })
+    await user.click(within(dialog).getByRole('button', { name: '确认阻断' }))
+    expect(toggle).toBeChecked()
+    await user.click(screen.getByRole('button', { name: '保存方案' }))
+    await waitFor(() =>
+      expect(saveSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ icmp: { block_all_ping: true } }),
+      ),
+    )
+
+    // 关闭不用确认
+    await user.click(toggle)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(toggle).not.toBeChecked()
+  })
+
   it('checks the remote DNS server and saves it, or null when empty', async () => {
     const user = userEvent.setup()
     const { saveSpy } = setup((p) => ({ id: p.id }))
