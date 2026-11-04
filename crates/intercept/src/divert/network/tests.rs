@@ -535,23 +535,14 @@ fn target_udp_follows_fail_policy_until_the_udp_relay_lands() {
 }
 
 #[test]
-fn non_target_and_unknown_udp_pass_untouched() {
+fn non_target_udp_passes_untouched() {
     let r = rig();
     let t0 = Instant::now();
-    r.register_udp(
-        "192.168.1.5:6001",
-        "203.0.113.24:443",
-        OTHER,
-        FlowAction::Bypass,
-    );
-    for (src, dst) in [
-        ("192.168.1.5:6001", "203.0.113.24:443"),
-        ("192.168.1.5:6002", "203.0.113.24:443"),
-    ] {
-        let pkt = udp4(sock(src), sock(dst));
-        let (out, after, _) = r.send(pkt.clone(), app_addr(), t0);
-        assert_eq!((out, after), (Outcome::Pass, pkt), "{src} -> {dst}");
-    }
+    let (src, dst) = ("192.168.1.5:6001", "203.0.113.24:443");
+    r.register_udp(src, dst, OTHER, FlowAction::Bypass);
+    let pkt = udp4(sock(src), sock(dst));
+    let (out, after, _) = r.send(pkt.clone(), app_addr(), t0);
+    assert_eq!((out, after), (Outcome::Pass, pkt));
     // 入站 UDP 不在过滤器里，防御性地放回
     let inbound = udp4(sock("203.0.113.24:443"), sock("192.168.1.5:6001"));
     assert_eq!(r.send(inbound, inbound_addr(), t0).0, Outcome::Pass);
@@ -623,6 +614,22 @@ fn target_udp_goes_to_the_udp_relay_and_the_original_is_dropped() {
     );
     assert_eq!(udp.forwarded.lock().unwrap().len(), 2);
     assert!(r.events().is_empty(), "no event per datagram");
+}
+
+#[test]
+fn a_datagram_ahead_of_its_socket_event_is_held_not_passed() {
+    // C-NET-04：刚启动的目标进程的第一个数据报先于 CONNECT 事件，放回去就是泄漏
+    let (r, udp) = udp_rig(InterceptSettings::default());
+    let t0 = Instant::now();
+    let pkt = ping(GAME_UDP, SERVER);
+    let (out, after, _) = r.send(pkt.clone(), app_addr(), t0);
+    assert_eq!((out, after), (Outcome::Hold, pkt.clone()));
+    assert!(udp.forwarded.lock().unwrap().is_empty());
+    // 暂存期间不消耗任何东西，归属到了再处理一次就进中继
+    assert_eq!(r.send(pkt.clone(), app_addr(), t0).0, Outcome::Hold);
+    r.register_udp(GAME_UDP, SERVER, GAME, FlowAction::Redirect { group: 0 });
+    assert_eq!(r.send(pkt, app_addr(), t0).0, Outcome::Drop);
+    assert_eq!(udp.forwarded.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -706,10 +713,10 @@ fn idle_udp_sockets_are_swept_with_the_connections() {
     r.send(ping(GAME_UDP, SERVER), app_addr(), t0);
     r.engine.sweep(t0 + crate::divert::udp::UDP_IDLE);
     assert!(r.engine.udp_sockets().is_empty());
-    // 回收之后、又没有登记：不认识，放回
+    // 回收之后、又没有登记：不认识，暂存后重新归属，不能放回
     r.engine.flows.clear();
     assert_eq!(
         r.send(ping(GAME_UDP, SERVER), app_addr(), t0).0,
-        Outcome::Pass
+        Outcome::Hold
     );
 }

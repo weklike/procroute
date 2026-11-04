@@ -3,10 +3,10 @@
 //!
 //! - 收包线程：多个线程同时在同一个句柄上收包（WinDivert 允许），每个线程的缓冲区在启动时分配好，
 //!   逐包交给 [`Engine::process`]，按结果放回、改写后注入或丢弃（C-CODE-04、C-CODE-05）；
-//! - 暂存：第一个 SYN 先于 SOCKET 层事件到达时（[`Outcome::Hold`]），把它放进预先分配的暂存槽，
-//!   每 [`PENDING_TICK`] 重新查一次登记表；超过 [`PENDING_LIMIT`] 仍没有归属，就按「本地端口 + 远端」
-//!   在系统连接表里反查 PID，交给 [`Attributor::attribute`] 判定。反查不到的按无法归属放行并计入
-//!   `attribution_miss`。暂存槽满了就在收包线程上直接兜底归属；
+//! - 暂存：新流的第一个包（TCP 的 SYN、UDP 的数据报）先于 SOCKET 层事件到达时（[`Outcome::Hold`]），把它
+//!   放进预先分配的暂存槽，每 [`PENDING_TICK`] 重新查一次登记表；超过 [`PENDING_LIMIT`] 仍没有归属，就在系统
+//!   连接表里反查 PID（TCP 按「本地端口 + 远端」，UDP 按本地地址与端口），交给 [`Attributor::attribute`] 判定。
+//!   反查不到的按无法归属放行并计入 `attribution_miss`。暂存槽满了或包放不下，就在收包线程上直接兜底归属；
 //! - 暂存线程同时每秒回收一次已收尾的连接（[`Engine::sweep`]）。
 
 use std::io;
@@ -16,7 +16,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use procroute_platform_win::nettable::tcp_owner_pid;
+use procroute_platform_win::nettable::{tcp_owner_pid, udp_owner_pid};
 use procroute_proto::event::Network;
 
 use super::ffi::{Address, Handle, Layer, MTU_MAX, Param, Shutdown, WinDivert};
@@ -31,7 +31,7 @@ pub const PENDING_TICK: Duration = Duration::from_millis(2);
 pub const PENDING_LIMIT: Duration = Duration::from_millis(50);
 /// 连接跟踪的回收间隔。
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
-/// 暂存槽数与每槽字节数。SYN 不带数据时不到 100 字节；放不下的（带 TFO 数据）直接兜底归属。
+/// 暂存槽数与每槽字节数。SYN 不带数据时不到 100 字节，放不下的（带 TFO 数据、较大的 UDP 数据报）直接兜底归属。
 const PENDING_SLOTS: usize = 256;
 const PENDING_BYTES: usize = 256;
 /// 句柄队列长度取上限（`WINDIVERT_PARAM_QUEUE_LENGTH_MAX`）。
@@ -224,12 +224,13 @@ fn deliver(shared: &Shared, pkt: &mut [u8], addr: &mut Address, outcome: Outcome
     }
 }
 
-/// 放进暂存槽；同一条流已经在暂存（重传的 SYN）就丢掉这份。放不下返回 `false`。
+/// 放进暂存槽。同一条 TCP 流已经在暂存（重传的 SYN）就丢掉这份；UDP 的每个数据报都是数据，各占一个槽。
+/// 放不下返回 `false`。
 fn hold(shared: &Shared, pkt: &[u8], addr: Address, now: Instant) -> bool {
     if pkt.len() > PENDING_BYTES {
         return false;
     }
-    let Some(key) = syn_key(pkt) else {
+    let Some(key) = flow_key(pkt) else {
         return false;
     };
     let mut slots = shared
@@ -237,7 +238,7 @@ fn hold(shared: &Shared, pkt: &[u8], addr: Address, now: Instant) -> bool {
         .slots
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if slots.iter().any(|s| syn_key(&s.buf[..s.len]) == Some(key)) {
+    if key.0 == Network::Tcp && slots.iter().any(|s| flow_key(&s.buf[..s.len]) == Some(key)) {
         return true;
     }
     if slots.len() >= PENDING_SLOTS {
@@ -255,13 +256,13 @@ fn hold(shared: &Shared, pkt: &[u8], addr: Address, now: Instant) -> bool {
     true
 }
 
-/// 暂存的 SYN 的（源端口, 目的地址）。
-fn syn_key(pkt: &[u8]) -> Option<(u16, SocketAddr)> {
+/// 暂存的包的（协议, 源端口, 目的地址）。
+fn flow_key(pkt: &[u8]) -> Option<(Network, u16, SocketAddr)> {
     let mut copy = [0u8; PENDING_BYTES];
     let len = pkt.len().min(PENDING_BYTES);
     copy[..len].copy_from_slice(&pkt[..len]);
     let p = packet::parse(&mut copy[..len]).ok()?;
-    Some((p.src().port(), p.dst()))
+    Some((p.network(), p.src().port(), p.dst()))
 }
 
 /// 兜底归属：反查连接表拿 PID 后判定登记，再交给引擎。反查不到按无法归属（PID 0）判定。
@@ -269,10 +270,14 @@ fn fallback(shared: &Shared, pkt: &mut [u8], addr: &mut Address, now: Instant) -
     let Ok(p) = packet::parse(pkt) else {
         return Outcome::Pass;
     };
-    let (src, dst) = (p.src(), p.dst());
-    let pid = tcp_owner_pid(src.port(), dst).ok().flatten().unwrap_or(0);
+    let (network, src, dst) = (p.network(), p.src(), p.dst());
+    let owner = match network {
+        Network::Tcp => tcp_owner_pid(src.port(), dst),
+        Network::Udp => udp_owner_pid(src),
+    };
+    let pid = owner.ok().flatten().unwrap_or(0);
     let key = FlowKey {
-        network: Network::Tcp,
+        network,
         local: src,
         remote: dst,
     };
@@ -284,7 +289,7 @@ fn fallback(shared: &Shared, pkt: &mut [u8], addr: &mut Address, now: Instant) -
     }
 }
 
-/// 暂存线程：重查暂存的 SYN，超时兜底归属；每秒回收一次连接跟踪。
+/// 暂存线程：重查暂存的包，超时兜底归属；每秒回收一次连接跟踪。
 fn hold_and_sweep(shared: &Shared) {
     let mut last_sweep = Instant::now();
     let mut ready: Vec<Pending> = Vec::with_capacity(PENDING_SLOTS);
