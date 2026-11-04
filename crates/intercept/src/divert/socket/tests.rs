@@ -118,6 +118,17 @@ fn ignores_other_events_protocols_and_layers() {
 }
 
 #[test]
+fn system_events_are_not_flows() {
+    // 放回一个包时 WFP 再报的 PID 4 CONNECT：登记它会用「放行」盖掉目标流的改道登记
+    let local = sock("192.168.1.5:50001");
+    let remote = sock("203.0.113.24:443");
+    for ev in [event::SOCKET_CONNECT, event::SOCKET_CLOSE] {
+        let a = socket_address(ev, SYSTEM_PID, PROTO_UDP, local, remote);
+        assert_eq!(decode(&a), None, "{ev}");
+    }
+}
+
+#[test]
 fn the_filter_compiles_at_the_socket_layer() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/windivert/bin");
     let wd = WinDivert::load(&dir.canonicalize().unwrap_or_else(|e| {

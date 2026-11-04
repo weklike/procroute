@@ -53,7 +53,8 @@ third_party/
   windivert/     锁定版本的 dll/sys + SHA256 + LICENSE（只读）
   sing-box/      版本锁文件与下载脚本（不提交二进制）
 xtask/           cargo xtask：生成类型、拉取依赖、开发运行、打包、e2e
-tests/e2e/       Windows 虚拟机上的端到端用例；tests/fixtures/ 测试数据
+tests/e2e/       Windows 虚拟机上的端到端用例（包名 procroute-e2e）：泄漏检测器 leak_detector.rs、回显目标进程
+                 echo_target.rs、测试框架 harness.rs、用例 tests/；tests/fixtures/ 测试数据
 docs/            design.md、adr/
 ```
 
@@ -79,7 +80,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | --- | --- |
 | 格式化 | `cargo fmt --all` ；`pnpm -C app format` |
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` ；`pnpm -C app lint` ；`pnpm -C app typecheck` |
-| 跨平台单测（任意 OS） | `cargo nextest run -p procroute-proto -p procroute-config -p procroute-rules -p procroute-intercept -p procroute-relay -p procroute-platform-win -p procroute-core-mgr -p procroute-procwatch`（core-mgr 的 `sing-box check` 回归只在 Windows 上编译） |
+| 跨平台单测（任意 OS） | `cargo nextest run -p procroute-proto -p procroute-config -p procroute-rules -p procroute-intercept -p procroute-relay -p procroute-platform-win -p procroute-core-mgr -p procroute-procwatch -p procroute-e2e`（core-mgr 的 `sing-box check` 回归只在 Windows 上编译） |
 | 行覆盖率（C-TEST-01） | `cargo llvm-cov nextest -p <crate> --fail-under-lines 80`（`rules`、`config`、`relay` 在 CI 中强制） |
 | 全量单测（Windows） | `cargo nextest run --workspace` |
 | 前端单测 | `pnpm -C app test` |
@@ -93,6 +94,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | 发版 | 在 GitHub 上发布 Release，tag 形如 `v1.2.3`。`.github/workflows/release.yml` 跑 CI，按 tag 改版本号（`cargo xtask set-version <tag>`），打包并把安装器、`SHA256SUMS.txt`、构建证明和说明放到该 Release；重跑：`gh workflow run release.yml --ref <tag>`。tag 指向的提交必须已包含这个工作流 |
 | 端到端测试 | `cargo xtask e2e --vm <name>`（只在 Hyper-V 虚拟机中运行） |
 | 虚拟机专属测试（驱动、WFP、管理员） | `cargo xtask sandbox-test [--only <测试名>] [--keep-open]`（在开发机上编译，在 Windows Sandbox 里运行；需要启用「Windows 沙盒」功能） |
+| 泄漏测试（C-TEST-02） | `cargo xtask sandbox-test --only leak_e2e`：泄漏计数必须为 0，`attribution_miss` 不超过基线；实测数字留在 `target/sandbox/out/leak-report.log` |
 | 依赖与许可审计 | `cargo deny check` ；`pnpm -C app audit` |
 | 添加 shadcn/ui 组件 | `pnpm -C app dlx shadcn@latest add <component>` |
 
@@ -127,7 +129,7 @@ pnpm -C app lint && pnpm -C app typecheck && pnpm -C app test
 | --- | --- |
 | 修改 `crates/proto` | 运行 `cargo xtask gen-types`，提交生成的 `app/src/api/` 文件；破坏性变更需提升 IPC 协议版本号 |
 | 修改 Profile / 配置结构 | `schema_version` +1，新增迁移函数和迁移测试（旧样例放 `tests/fixtures/config/`） |
-| 修改 `intercept` / `relay` | 补充或更新单测；PR 描述说明对「泄漏」「fail-closed」「防回环」三项的影响 |
+| 修改 `intercept` / `relay` | 补充或更新单测；运行 `cargo xtask sandbox-test --only leak_e2e`（C-TEST-02）；PR 描述说明对「泄漏」「fail-closed」「防回环」三项的影响 |
 | 修改 sing-box 配置生成 | 用锁定版本的 sing-box 执行配置检查命令做回归；更新快照测试 |
 | 升级 sing-box / WinDivert | 单独 PR，只改版本锁与 SHA256；附兼容性验证记录 |
 | 新增 IPC 修改类方法 | 加 schema 校验、大小限制和审计日志 |

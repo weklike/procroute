@@ -2827,6 +2827,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "procroute-e2e"
+version = "1.0.1"
+dependencies = [
+ "procroute-intercept",
+ "procroute-proto",
+ "serde_json",
+]
+
+[[package]]
 name = "procroute-intercept"
 version = "1.0.1"
 dependencies = [

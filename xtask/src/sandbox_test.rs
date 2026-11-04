@@ -30,54 +30,65 @@ struct Suite {
     features: &'static str,
     /// `tests/<名字>.rs`
     test: &'static str,
-    /// 端到端测试要的「安装目录」：同一次构建产出的这个可执行文件，连同锁定版本的 sing-box 与 WinDivert，
-    /// 放进沙盒里的 `install`（经 `PROCROUTE_INSTALL_DIR` 告诉测试）。
-    install: Option<&'static str>,
+    /// 端到端测试：要服务的「安装目录」和回显目标进程（见 [`stage_e2e`]）。
+    e2e: bool,
 }
 
-const SUITES: [Suite; 7] = [
+const E2E_PACKAGE: &str = "procroute-e2e";
+/// 回显目标进程：测试包里的 bin，放在测试程序旁边。
+const ECHO_TARGET: &str = "echo_target";
+const SVC_PACKAGE: &str = "procroute-svc";
+/// 开发构建的服务跳过控制管道客户端的签名校验（C-SEC-02 只允许调试构建这样做）。
+const SVC_FEATURES: &str = "insecure-skip-client-auth";
+
+const SUITES: [Suite; 8] = [
     Suite {
         package: "procroute-platform-win",
         features: "vm-tests",
         test: "wfp_vm",
-        install: None,
+        e2e: false,
     },
     Suite {
         package: "procroute-platform-win",
         features: "admin-tests",
         test: "etw_admin",
-        install: None,
+        e2e: false,
     },
     Suite {
         package: "procroute-procwatch",
         features: "admin-tests",
         test: "watcher_admin",
-        install: None,
+        e2e: false,
     },
     Suite {
         package: "procroute-intercept",
         features: "vm-tests",
         test: "divert_vm",
-        install: None,
+        e2e: false,
     },
     Suite {
         package: "procroute-intercept",
         features: "vm-tests",
         test: "redirect_vm",
-        install: None,
+        e2e: false,
     },
     Suite {
         package: "procroute-intercept",
         features: "vm-tests",
         test: "precise_vm",
-        install: None,
+        e2e: false,
     },
     Suite {
-        package: "procroute-svc",
-        // 开发构建的服务跳过控制管道客户端的签名校验（C-SEC-02 只允许调试构建这样做）
-        features: "vm-tests,insecure-skip-client-auth",
+        package: E2E_PACKAGE,
+        features: "vm-tests",
         test: "precise_e2e",
-        install: Some("procroute-svc"),
+        e2e: true,
+    },
+    Suite {
+        package: E2E_PACKAGE,
+        features: "vm-tests",
+        test: "leak_e2e",
+        e2e: true,
     },
 ];
 
@@ -179,10 +190,8 @@ fn run_suites(root: &Path, suites: &[&Suite], opts: &Options) -> Result<()> {
             .with_context(|| format!("cargo 没有报告 {} 的可执行文件", s.test))?;
         let file = format!("{}.exe", s.test);
         fs::copy(&exe, input.join(&file)).with_context(|| format!("复制 {}", exe.display()))?;
-        if let Some(bin) = s.install {
-            let bin_exe = sandbox::artifact_executable(&json, "bin", bin)
-                .with_context(|| format!("cargo 没有报告 {bin} 的可执行文件"))?;
-            stage_install(root, &input.join("install"), &bin_exe, bin)?;
+        if s.e2e {
+            stage_e2e(root, &base.join("build"), &input, &json)?;
         }
         manifest.push(serde_json::json!({ "name": s.test, "file": file, "args": [] }));
     }
@@ -213,11 +222,36 @@ fn run_suites(root: &Path, suites: &[&Suite], opts: &Options) -> Result<()> {
     report(&output)
 }
 
-/// 端到端测试的安装目录：服务程序、锁定版本的 sing-box 与 WinDivert 放在一起，和正式安装一样。
-fn stage_install(root: &Path, dest: &Path, bin_exe: &Path, bin: &str) -> Result<()> {
-    stage_windivert(root, dest)?;
-    fs::copy(bin_exe, dest.join(format!("{bin}.exe")))
-        .with_context(|| format!("复制 {}", bin_exe.display()))?;
+/// 端到端测试要的文件。`test_json` 是编译测试程序时 cargo 的输出。
+///
+/// - 回显目标进程放在测试程序旁边（`harness::echo_target_exe`）；
+/// - 安装目录 `install`（经 `PROCROUTE_INSTALL_DIR` 告诉测试）：服务程序、锁定版本的 sing-box 与 WinDivert 放在
+///   一起，和正式安装一样。服务在另一个包里，cargo 不会为这里的测试编译它，要单独编译。
+fn stage_e2e(root: &Path, target_dir: &Path, input: &Path, test_json: &str) -> Result<()> {
+    let echo = sandbox::artifact_executable(test_json, "bin", ECHO_TARGET)
+        .with_context(|| format!("cargo 没有报告 {ECHO_TARGET} 的可执行文件"))?;
+    fs::copy(&echo, input.join(format!("{ECHO_TARGET}.exe")))
+        .with_context(|| format!("复制 {}", echo.display()))?;
+
+    let dest = input.join("install");
+    stage_windivert(root, &dest)?;
+    let svc = sandbox::cargo_build(
+        root,
+        target_dir,
+        &[
+            "build",
+            "-p",
+            SVC_PACKAGE,
+            "--features",
+            SVC_FEATURES,
+            "--bin",
+            SVC_PACKAGE,
+        ],
+        "bin",
+        SVC_PACKAGE,
+    )?;
+    fs::copy(&svc, dest.join(format!("{SVC_PACKAGE}.exe")))
+        .with_context(|| format!("复制 {}", svc.display()))?;
     let kernel = root.join("third_party/sing-box/bin").join(KERNEL_FILE_NAME);
     fs::copy(&kernel, dest.join(KERNEL_FILE_NAME)).with_context(|| {
         format!(

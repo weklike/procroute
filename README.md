@@ -34,7 +34,8 @@ v1.0 的 8 条 P0 功能均已实现，并在 Windows Sandbox 中端到端验证
 
 ### 已知限制
 
-- IPv4 分片与带扩展头的 IPv6 包读不出端口，原样放回；分片的目标 UDP 会绕过代理（待分片重组）。
+- ICMP（例如 `ping`）不经过代理：由系统代发，归属不到进程，目标进程的 ICMP 会直接发出。
+- 已经分片的 IPv4 包（原始套接字才会产生）与带扩展头的 IPv6 包读不出端口，原样放回。普通的大 UDP 数据报不受影响：拦截层在分片之前看到完整的包（IPv4 实测，IPv6 还没有验证）。
 - 会话进行中修改节点后，排除表不会自动更新，需要重新启动会话。
 - TUN 模式下「包含子进程」不生效（sing-box 只按发起连接的进程判定）。
 - 不支持 Clash / mihomo 的 YAML 订阅；暂时不能从文件对话框添加进程（可以从运行中的进程列表添加）。
@@ -118,12 +119,14 @@ $env:VITE_IPC_MOCK='1'; pnpm -C app exec tauri dev   # 桌面外壳 + 模拟服�
 加载驱动、注册服务、改动网络设置的事一律不在开发机上做（C-TEST-04、AGENTS 第 8 节）。仓库用 Windows Sandbox 作为这类测试的虚拟机，程序在开发机上编译，进沙盒运行：
 
 ```powershell
-cargo xtask sandbox-test [--only <测试名>]   # 驱动、WFP、ETW 测试，以及精确模式的端到端测试 precise_e2e
+cargo xtask sandbox-test [--only <测试名>]   # 驱动、WFP、ETW 测试，以及端到端测试 precise_e2e、leak_e2e
 cargo xtask sandbox-dev                      # 在沙盒里运行真实的服务与界面，供手动联调（沙盒保持打开）
 cargo xtask sandbox-install                  # 在沙盒里验证安装器：安装、服务与界面、伪造界面被拒绝、卸载后无残留
 ```
 
 `precise_e2e` 不需要外网：测试自己起一个 SOCKS5 节点作为「远端代理」，验证目标进程的 TCP、UDP 与子进程经过节点，非目标进程与停止会话后不经过。
+
+`leak_e2e` 用泄漏检测器（`tests/e2e/leak_detector.rs`）统计目标进程真正发出去的包：没有会话时的直连必须被抓到；经过会话的 TCP、UDP、刚启动就发包的进程、子进程、超过 MTU 的数据报、内核被杀之后，都必须是 0。改动 `intercept` 或 `relay` 后必须跑（C-TEST-02）。
 
 提交前必须通过的检查见 [`AGENTS.md`](./AGENTS.md) 第 3.3 节。
 

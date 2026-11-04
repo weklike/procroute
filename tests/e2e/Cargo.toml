@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "procroute-e2e"
+description = "端到端测试：泄漏检测器、回显目标进程与只在虚拟机里运行的用例"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+autobins = false
+
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "echo_target"
+path = "echo_target.rs"
+
+[features]
+# 编译 tests/ 下的用例：启动真实的服务、加载驱动。只在测试虚拟机里开启（C-TEST-04），
+# 经 `cargo xtask sandbox-test --only leak_e2e` / `--only precise_e2e`。
+vm-tests = []
+
+# 抓包用 WinDivert，测试框架连服务的控制管道，都只在 Windows 上编译；
+# 包的解析与归属是纯逻辑，任意 OS 上都能测。
+[target.'cfg(windows)'.dependencies]
+procroute-intercept = { path = "../../crates/intercept" }
+procroute-proto = { path = "../../crates/proto" }
+serde_json = "1.0.154"
+
+[lints]
+workspace = true

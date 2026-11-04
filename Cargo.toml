@@ -12,6 +12,7 @@ members = [
     "crates/relay",
     "crates/rules",
     "crates/svc",
+    "tests/e2e",
     "xtask",
 ]
 

@@ -19,7 +19,9 @@
 //!
 //! UDP（T-091，见 [`super::udp`]）：出站 UDP 也抓。先看 SOCKET 层对（本地端口, 远端）的登记（不消耗）：
 //! 改道的交给 UDP 中继、原包丢弃，阻断的丢弃，放行的放回；没有登记时看这个本地端口是不是已登记的目标
-//! 套接字（同一套接字发往新的远端，事件还没到）。目标数据报再按方案过一遍：开了 QUIC 阻断时 443 丢弃，
+//! 套接字（同一套接字发往新的远端，事件还没到）；都不是就和第一个 SYN 一样交给调用方暂存（C-NET-04），不能
+//! 直接放回：刚启动的目标进程的第一个数据报几乎总是先于它的 CONNECT 事件走完判定。
+//! 目标数据报再按方案过一遍：开了 QUIC 阻断时 443 丢弃，
 //! 关了 UDP 代理时只劫持 53 端口、其余直连（用户的选择）。没有 UDP 中继时目标数据报属于「处理不了」，
 //! 按 fail_policy 处理（C-NET-07）。逐个数据报不发事件。
 //!
@@ -119,7 +121,7 @@ pub enum Outcome {
     Inject,
     /// 丢弃。
     Drop,
-    /// 新连接的第一个 SYN 还没有归属：调用方暂存，稍后重试或兜底归属（C-NET-04）。
+    /// 新流的第一个包（TCP 的 SYN、UDP 的数据报）还没有归属：调用方暂存，稍后重试或兜底归属（C-NET-04）。
     Hold,
 }
 
@@ -277,7 +279,7 @@ impl Engine {
             Some(_) => return Outcome::Pass,
             None => match self.sockets.touch(src, now) {
                 Some(group) => group,
-                None => return Outcome::Pass,
+                None => return Outcome::Hold,
             },
         };
         let port = dst.port();
