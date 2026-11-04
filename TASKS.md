@@ -230,6 +230,17 @@
   - 发版：在 GitHub 上发布 Release 时，`.github/workflows/release.yml` 跑 CI，按 tag 改版本号（`cargo xtask set-version`，
     安装包、界面与服务的版本都跟随 tag），打包并上传安装器、`SHA256SUMS.txt` 和构建来源证明，并在发行说明后追加安装
     说明、校验和与源码链接（C-DEP-05、design 9.5）。不需要任何密钥。改动打包相关文件的 PR 只打包，安装器留在 artifact 里。
+- 用户试用后的修复（2026-11-04）：
+  - 对话框溢出：网格列的宽度由内容决定，长路径（`WindowsApps` 下那种）把它撑到 886px，而框体只有 672px，搜索框、列表和按钮都
+    跑到框外。**与全屏无关，任何窗口尺寸下都有。** `components/ui/dialog.tsx` 加了 `grid-cols-1`，比窗口高时在框内滚动。jsdom 没有
+    布局，组件测试抓不到这种问题，是用无头 Chrome 在 4 种窗口尺寸下量出来的；回归测试只能确认这两个类还在。
+  - 手动添加节点（`features/node/AddNodeDialog.tsx`、`manualNode.ts`）：表单拼成分享链接后走 `node.import`，校验、去重和凭据存储
+    都不用重写，也不新增 IPC 方法。两边共用 `tests/fixtures/node-links/manual.json`：前端确认表单拼出这些链接，core-mgr 确认这些链接
+    解析出表单填的内容（含带 URL 特殊字符的密码）。没有放进表单、要用分享链接的：Shadowsocks 插件、Hysteria2 端口跳跃。
+    **已知局限：** 节点添加后不能在界面上修改或删除（没有对应的 IPC 方法）。
+  - 文件夹规则：「添加进程」新增文件夹页，生成一条 `dir` 规则，匹配里面的所有程序，包括还没运行的，服务不用改。可以手填路径，也
+    可以用系统的文件夹对话框（外壳命令 `pick_folder`，新依赖 `tauri-plugin-dialog`，2026-11-04 维护者确认，AGENTS 第 8 节第 2 条）。
+    只从 Rust 调用，capabilities 不给前端插件自己的命令（C-SEC-10）。`leak_e2e` 确认文件夹里后启动的程序走节点，文件夹外的不受影响。
 - 桌面客户端（`app/src-tauri`，包名 `procroute-ui`）：只依赖 proto；一条长连接、断线每 2 秒重连并重放订阅。
   外壳自己的事件 `shell:connection`（与服务的连接变化，界面据此清空服务端数据，C-UI-02）与 `shell:tray`（托盘点击）
   不属于 IPC 协议，类型写在 `app/src/api/shell.ts`。托盘菜单由前端生成并下发（文案走 i18n，C-UI-04），外壳只处理
@@ -322,7 +333,7 @@
     远程 DNS 服务器只留协议。
   - 保存：报告不经过 WebView。外壳命令 `diag_export`（`app/src-tauri/src/diag.rs`）调用 `diag.export`，加上界面
     版本，以 `procroute-diag-<UTC 时间>.json` 新建在当前用户的「下载」文件夹（只新建、不覆盖），把路径交给界面
-    显示。没有用保存对话框：那需要新增 `tauri-plugin-dialog` 依赖（AGENTS 第 8 节第 2 条）。失败分「服务」与
+    显示。当时没有保存对话框的依赖，所以没有用（后来为选文件夹引入了 `tauri-plugin-dialog`，见下）。失败分「服务」与
     「存盘」两类，界面分别提示。不在桌面外壳里时设置页不显示入口。
   - 产出文件与原计划不同：除 `svc/src/diag.rs` 与 `features/settings/*` 外，还改了 proto、platform-win 与外壳。
   - WinDivert 文件与锁的比对随 T-078（svc 接入 intercept）补上。

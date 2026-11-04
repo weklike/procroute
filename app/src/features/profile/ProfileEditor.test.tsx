@@ -130,6 +130,41 @@ describe('ProfileEditor', () => {
     )
   })
 
+  it('adds a folder as one rule that covers everything inside it', async () => {
+    const user = userEvent.setup()
+    const { saveSpy } = setup((p) => ({ id: p.id }))
+    await user.click(screen.getByRole('button', { name: '添加进程' }))
+    const dialog = await screen.findByRole('dialog', { name: '添加进程到 game 组' })
+    await user.click(within(dialog).getByRole('tab', { name: '文件夹' }))
+
+    // 相对路径永远匹配不到进程，不让加
+    const add = within(dialog).getByRole('button', { name: '添加规则' })
+    const folder = within(dialog).getByLabelText('文件夹')
+    expect(add).toBeDisabled()
+    await user.type(folder, 'Games\\MyGame')
+    expect(add).toBeDisabled()
+    expect(within(dialog).getByText(/请填写完整路径/)).toBeInTheDocument()
+
+    await user.clear(folder)
+    await user.type(folder, 'D:\\Tools')
+    await user.click(add)
+
+    await user.click(screen.getByRole('button', { name: '添加进程' }))
+    const again = await screen.findByRole('dialog', { name: '添加进程到 game 组' })
+    await user.click(within(again).getByRole('tab', { name: '文件夹' }))
+    await user.type(within(again).getByLabelText('文件夹'), 'E:\\Portable')
+    await user.click(within(again).getByRole('checkbox', { name: '包含子文件夹' }))
+    await user.click(within(again).getByRole('button', { name: '添加规则' }))
+
+    await user.click(screen.getByRole('button', { name: '保存方案' }))
+    await waitFor(() => expect(saveSpy).toHaveBeenCalled())
+    expect(saveSpy.mock.calls[0]?.[0].groups[0]?.match).toEqual([
+      { type: 'name', value: 'launcher.exe', recursive: false },
+      { type: 'dir', value: 'D:\\Tools', recursive: true },
+      { type: 'dir', value: 'E:\\Portable', recursive: false },
+    ])
+  })
+
   it('asks for confirmation before blocking ping for the whole machine', async () => {
     const user = userEvent.setup()
     const { saveSpy } = setup((p) => ({ id: p.id }))

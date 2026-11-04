@@ -99,6 +99,11 @@ export function formPath(serverPath: string): string {
   return serverPath.replace(/\[(\d+)\]/g, '.$1')
 }
 
+/** 盘符或 UNC 开头的完整路径。相对路径永远匹配不到进程。 */
+export function isAbsolutePath(path: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path.trim())
+}
+
 /** 进程路径所在目录（Windows 路径）。 */
 export function parentDir(path: string): string {
   const i = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))

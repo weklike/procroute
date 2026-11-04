@@ -4,7 +4,7 @@ import { renderHook, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { LatencyResult, NodeInfo } from '@/api/generated'
+import type { ImportIssue, LatencyResult, NodeImportParams, NodeInfo } from '@/api/generated'
 import { mockCall } from '@/test/ipc'
 import { useFakeViewport } from '@/test/layout'
 import { renderWithQuery, testQueryClient } from '@/test/render'
@@ -16,6 +16,7 @@ vi.mock('@/api/client', async (orig) => ({
 }))
 
 const { call } = await import('@/api/client')
+const { default: AddNodeDialog } = await import('./AddNodeDialog')
 const { default: ImportLinksDialog } = await import('./ImportLinksDialog')
 const { default: AddSubscriptionDialog } = await import('./AddSubscriptionDialog')
 const { default: NodeTable } = await import('./NodeTable')
@@ -73,6 +74,140 @@ describe('ImportLinksDialog', () => {
     )
     expect(await screen.findByText('请粘贴至少一条分享链接')).toBeInTheDocument()
     expect(importSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('AddNodeDialog', () => {
+  const UUID = 'bf000d23-0752-40b4-affe-68f7707a9661'
+
+  function setup(result = { added: 1, skipped: 0, issues: [] as ImportIssue[] }) {
+    const importSpy = vi.fn<(p: NodeImportParams) => typeof result>(() => result)
+    mockCall(call, {
+      'node.import': importSpy,
+      'node.list': () => ({ nodes: [], outbounds: [], subscriptions: [] }),
+    })
+    renderWithQuery(<AddNodeDialog />)
+    return { importSpy, user: userEvent.setup() }
+  }
+
+  async function open(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: '手动添加' }))
+    return screen.findByRole('dialog', { name: '手动添加节点' })
+  }
+
+  it('turns the form into a share link and closes', async () => {
+    const { importSpy, user } = setup()
+    const dialog = await open(user)
+    const field = (name: string) => within(dialog).getByLabelText(name)
+
+    await user.selectOptions(field('协议'), 'trojan')
+    await user.type(field('名称（可选）'), 'HK')
+    await user.type(field('服务器'), 'tj.example.com')
+    await user.type(field('端口'), '443')
+    await user.type(field('密码'), 'p@ss')
+    await user.click(within(dialog).getByRole('button', { name: '添加' }))
+
+    await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1))
+    expect(importSpy.mock.calls[0]?.[0]).toEqual({
+      kind: 'share_links',
+      text: 'trojan://p%40ss@tj.example.com:443?security=tls#HK',
+    })
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('shows only the fields of the chosen protocol and security', async () => {
+    const { user } = setup()
+    const dialog = await open(user)
+    const field = (name: string) => within(dialog).queryByLabelText(name)
+    const protocol = within(dialog).getByLabelText('协议')
+
+    // Shadowsocks：加密方式 + 密码，没有 UUID，也没有 TLS 选项
+    expect(field('加密方式')).toBeInTheDocument()
+    expect(field('UUID')).not.toBeInTheDocument()
+    expect(field('SNI（可选）')).not.toBeInTheDocument()
+
+    // VLESS：默认 TLS；选 REALITY 才要公钥，且不能跳过证书校验
+    await user.selectOptions(protocol, 'vless')
+    expect(field('UUID')).toBeInTheDocument()
+    expect(field('密码')).not.toBeInTheDocument()
+    expect(field('传输安全')).toHaveValue('tls')
+    expect(field('SNI（可选）')).toBeInTheDocument()
+    expect(field('REALITY 公钥')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('checkbox', { name: /跳过证书校验/ })).toBeInTheDocument()
+    await user.selectOptions(within(dialog).getByLabelText('传输安全'), 'reality')
+    expect(field('REALITY 公钥')).toBeInTheDocument()
+    expect(within(dialog).queryByRole('checkbox', { name: /跳过证书校验/ })).toBeNull()
+
+    // 传输方式决定路径和服务名
+    await user.selectOptions(within(dialog).getByLabelText('传输方式'), 'ws')
+    expect(field('路径（可选）')).toBeInTheDocument()
+    expect(field('服务名（可选）')).not.toBeInTheDocument()
+    await user.selectOptions(within(dialog).getByLabelText('传输方式'), 'grpc')
+    expect(field('路径（可选）')).not.toBeInTheDocument()
+    expect(field('服务名（可选）')).toBeInTheDocument()
+
+    // SOCKS：认证可选，没有 TLS
+    await user.selectOptions(protocol, 'socks')
+    expect(field('用户名（可选）')).toBeInTheDocument()
+    expect(field('密码（可选）')).toBeInTheDocument()
+    expect(field('传输安全')).not.toBeInTheDocument()
+  })
+
+  it('never shows credentials in clear text', async () => {
+    const { user } = setup()
+    const dialog = await open(user)
+    const protocol = within(dialog).getByLabelText('协议')
+    expect(within(dialog).getByLabelText('密码')).toHaveAttribute('type', 'password')
+    await user.selectOptions(protocol, 'vless')
+    expect(within(dialog).getByLabelText('UUID')).toHaveAttribute('type', 'password')
+    await user.selectOptions(protocol, 'hysteria2')
+    expect(within(dialog).getByLabelText('Salamander 混淆密码（可选）')).toHaveAttribute(
+      'type',
+      'password',
+    )
+  })
+
+  it('points at the fields that need fixing and sends nothing', async () => {
+    const { importSpy, user } = setup()
+    const dialog = await open(user)
+    await user.selectOptions(within(dialog).getByLabelText('协议'), 'vless')
+    await user.type(within(dialog).getByLabelText('端口'), '70000')
+    await user.type(within(dialog).getByLabelText('UUID'), 'not-a-uuid')
+    await user.click(within(dialog).getByRole('button', { name: '添加' }))
+
+    expect(await within(dialog).findByText('端口应为 1 到 65535')).toBeInTheDocument()
+    expect(within(dialog).getByText('UUID 格式不正确')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('服务器')).toHaveAttribute('aria-invalid', 'true')
+    expect(importSpy).not.toHaveBeenCalled()
+  })
+
+  it('stays open with the reason when the service skips the node', async () => {
+    const { user } = setup({
+      added: 0,
+      skipped: 1,
+      issues: [{ line: 1, reason: 'duplicate' }],
+    })
+    const dialog = await open(user)
+    const field = (name: string) => within(dialog).getByLabelText(name)
+    await user.selectOptions(field('协议'), 'vmess')
+    await user.type(field('服务器'), 'vm.example.com')
+    await user.type(field('端口'), '443')
+    await user.type(field('UUID'), UUID)
+    await user.click(within(dialog).getByRole('button', { name: '添加' }))
+
+    // 只有一条链接，不说「第 1 行」
+    expect(await within(dialog).findByText('与已有节点重复')).toBeInTheDocument()
+    expect(field('服务器')).toHaveValue('vm.example.com')
+  })
+
+  it('clears everything when closed', async () => {
+    const { user } = setup()
+    let dialog = await open(user)
+    await user.type(within(dialog).getByLabelText('密码'), 'secret')
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    dialog = await open(user)
+    expect(within(dialog).getByLabelText('密码')).toHaveValue('')
   })
 })
 

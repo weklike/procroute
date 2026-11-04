@@ -479,3 +479,56 @@ fn every_parsed_node_renders() {
             .unwrap_or_else(|e| panic!("{link}: {e}"));
     }
 }
+
+/// 期望值里写到的字段必须相等；写成 `null` 的字段必须不存在。
+fn assert_contains(actual: &Value, expected: &Value, link: &str) {
+    match expected {
+        Value::Object(fields) => {
+            for (key, want) in fields {
+                if want.is_null() {
+                    assert!(actual.get(key).is_none_or(Value::is_null), "{key}: {link}");
+                } else {
+                    assert_contains(&actual[key], want, link);
+                }
+            }
+        }
+        _ => assert_eq!(actual, expected, "{link}"),
+    }
+}
+
+/// 「手动添加节点」的表单拼成分享链接后走这个解析器（app/src/features/node/manualNode.ts）。两边共用一份样例：
+/// 前端确认表单拼出这些链接，这里确认这些链接解析出的就是表单填的内容。
+#[test]
+fn links_built_by_the_manual_node_form_parse_as_filled_in() {
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/node-links/manual.json"
+    ))
+    .expect("fixture is JSON");
+    let cases = cases.as_array().expect("fixture is a list");
+    assert!(!cases.is_empty());
+    for case in cases {
+        let link = case["link"].as_str().expect("link");
+        let expect = &case["expect"];
+        let parsed = ok(link);
+        assert_eq!(
+            Some(parsed.name.as_str()),
+            expect["name"].as_str(),
+            "{link}"
+        );
+        let node = serde_json::to_value(&parsed.node).expect("node");
+        assert_contains(&node, &expect["node"], link);
+        let credentials = &parsed.credentials;
+        for (field, value) in [
+            ("username", &credentials.username),
+            ("password", &credentials.password),
+            ("uuid", &credentials.uuid),
+            ("obfs_password", &credentials.obfs_password),
+        ] {
+            assert_eq!(
+                value.as_ref().map(|s| s.expose().as_str()),
+                expect["credentials"][field].as_str(),
+                "{field}: {link}"
+            );
+        }
+    }
+}

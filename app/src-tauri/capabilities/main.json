@@ -10,6 +10,7 @@
     "allow-tray-update",
     "allow-autostart-get",
     "allow-autostart-set",
-    "allow-diag-export"
+    "allow-diag-export",
+    "allow-pick-folder"
   ]
 }

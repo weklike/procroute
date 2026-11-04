@@ -16,7 +16,7 @@ use procroute_e2e::harness::{
     install_dir, launcher_exe, record, start_session, start_session_with,
 };
 use procroute_e2e::leak_detector::{Detector, Flow, Report, TCP, UDP};
-use procroute_proto::profile::{FailPolicy, Mode, Profile};
+use procroute_proto::profile::{FailPolicy, MatchType, Mode, Profile};
 use serde_json::json;
 
 const TCP_PORT: u16 = 8080;
@@ -619,4 +619,53 @@ fn blocking_all_ping_also_works_in_tun_mode() {
         "ping is still blocked: {:?}",
         after.flows
     );
+}
+
+#[test]
+fn a_folder_rule_covers_programs_that_start_later() {
+    // 「添加进程」的文件夹页生成的就是这种规则。会话启动时文件夹里的程序都没有运行，路径规则也没有写它们的名字
+    let folder = std::env::temp_dir().join("procroute-e2e-folder");
+    let nested = folder.join("bin").join("x64");
+    std::fs::create_dir_all(&nested).expect("create the folder");
+    let inside = nested.join("some-game.exe");
+    std::fs::copy(echo_target_exe(), &inside).expect("copy echo_target");
+
+    let d = detector();
+    let node = Node::start(Reply::Echo);
+    let (service, mut c) = start_session_with(&node, &folder.to_string_lossy(), |p| {
+        p.groups[0].matchers[0].kind = MatchType::Dir;
+        p.groups[0].matchers[0].recursive = true;
+    });
+
+    let long = Duration::from_secs(5);
+    let tcp = tcp_echo(3, 1024, long).run_exe(&inside);
+    let udp = udp_echo(3, 1000, long).run_exe(&inside);
+    // 文件夹外面的同一个程序不受影响：直连，不经过节点（连不上，因为没有人应答）
+    let outside = tcp_echo(1, 16, Duration::from_millis(800)).run();
+    bystander_connect();
+    let report = d.finish().expect("the detector was working");
+    c.stop_session();
+    let targets = node.targets();
+    record(
+        "folder_rule",
+        &format!("{tcp:?}\n{udp:?}\n{outside:?}\nnode: {targets:?}"),
+    );
+
+    assert_no_leak(&report, &[tcp.pid, udp.pid]);
+    assert!(tcp.ok, "TCP echo: {}", tcp.output);
+    assert!(udp.ok, "UDP echo: {}", udp.output);
+    assert_eq!(
+        targets
+            .iter()
+            .filter(|t| **t == format!("{TEST_NET}:{TCP_PORT}"))
+            .count(),
+        1,
+        "only the program inside the folder reaches the node: {targets:?}"
+    );
+    assert!(
+        report.leaked_packets(&[outside.pid]) >= 1,
+        "the program outside the folder goes direct: {:?}",
+        report.flows
+    );
+    assert_attribution_within_baseline(&service);
 }

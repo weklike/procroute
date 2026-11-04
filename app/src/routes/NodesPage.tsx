@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next'
 import PageHeader from '@/components/PageHeader'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import AddNodeDialog from '@/features/node/AddNodeDialog'
 import AddSubscriptionDialog from '@/features/node/AddSubscriptionDialog'
 import { useNodes, useTestNodes } from '@/features/node/api'
 import ImportLinksDialog from '@/features/node/ImportLinksDialog'
@@ -32,6 +33,7 @@ export default function NodesPage() {
         hint={t('pages.nodes.hint')}
         actions={
           <>
+            <AddNodeDialog />
             <ImportLinksDialog />
             <Button
               variant="outline"

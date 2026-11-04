@@ -1,0 +1,521 @@
+[
+  {
+    "case": "shadowsocks 2022, password with URL metacharacters, non-ASCII name",
+    "form": {
+      "protocol": "shadowsocks",
+      "name": "香港 01",
+      "server": "ss.example.com",
+      "port": "8388",
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "p@ss:w/rd+%#? x"
+    },
+    "link": "ss://2022-blake3-aes-128-gcm%3Ap%40ss%3Aw%2Frd%2B%25%23%3F%20x@ss.example.com:8388#%E9%A6%99%E6%B8%AF%2001",
+    "expect": {
+      "name": "香港 01",
+      "node": {
+        "server": "ss.example.com",
+        "server_port": 8388,
+        "settings": {
+          "protocol": "shadowsocks",
+          "method": "2022-blake3-aes-128-gcm"
+        }
+      },
+      "credentials": {
+        "password": "p@ss:w/rd+%#? x"
+      }
+    }
+  },
+  {
+    "case": "shadowsocks AEAD, IPv6 server, no name",
+    "form": {
+      "protocol": "shadowsocks",
+      "server": "2001:db8::1",
+      "port": "443",
+      "method": "aes-256-gcm",
+      "password": "secret"
+    },
+    "link": "ss://aes-256-gcm%3Asecret@[2001:db8::1]:443",
+    "expect": {
+      "name": "[2001:db8::1]:443",
+      "node": {
+        "server": "2001:db8::1",
+        "server_port": 443,
+        "settings": {
+          "protocol": "shadowsocks",
+          "method": "aes-256-gcm"
+        }
+      },
+      "credentials": {
+        "password": "secret"
+      }
+    }
+  },
+  {
+    "case": "vmess over WebSocket and TLS with every TLS option",
+    "form": {
+      "protocol": "vmess",
+      "name": "日本 VMess",
+      "server": "vm.example.com",
+      "port": "443",
+      "uuid": "BF000D23-0752-40B4-AFFE-68F7707A9661",
+      "vmessCipher": "aes-128-gcm",
+      "security": "tls",
+      "sni": "sni.example.com",
+      "insecure": true,
+      "alpn": "h2,http/1.1",
+      "fingerprint": "chrome",
+      "transport": "ws",
+      "path": "/ws path",
+      "host": "cdn.example.com"
+    },
+    "link": "vmess://eyJ2IjoiMiIsInBzIjoi5pel5pysIFZNZXNzIiwiYWRkIjoidm0uZXhhbXBsZS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiJCRjAwMEQyMy0wNzUyLTQwQjQtQUZGRS02OEY3NzA3QTk2NjEiLCJhaWQiOiIwIiwic2N5IjoiYWVzLTEyOC1nY20iLCJuZXQiOiJ3cyIsInR5cGUiOiJub25lIiwiaG9zdCI6ImNkbi5leGFtcGxlLmNvbSIsInBhdGgiOiIvd3MgcGF0aCIsInRscyI6InRscyIsInNuaSI6InNuaS5leGFtcGxlLmNvbSIsImFscG4iOiJoMixodHRwLzEuMSIsImZwIjoiY2hyb21lIiwiYWxsb3dJbnNlY3VyZSI6IjEifQ==",
+    "expect": {
+      "name": "日本 VMess",
+      "node": {
+        "server": "vm.example.com",
+        "server_port": 443,
+        "settings": {
+          "protocol": "vmess",
+          "security": "aes-128-gcm",
+          "tls": {
+            "server_name": "sni.example.com",
+            "insecure": true,
+            "alpn": [
+              "h2",
+              "http/1.1"
+            ],
+            "fingerprint": "chrome"
+          },
+          "transport": {
+            "type": "ws",
+            "path": "/ws path",
+            "host": "cdn.example.com"
+          }
+        }
+      },
+      "credentials": {
+        "uuid": "bf000d23-0752-40b4-affe-68f7707a9661"
+      }
+    }
+  },
+  {
+    "case": "vmess over gRPC without TLS: options of hidden fields stay out",
+    "form": {
+      "protocol": "vmess",
+      "server": "vm.example.com",
+      "port": "8443",
+      "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
+      "security": "none",
+      "sni": "ignored.example.com",
+      "insecure": true,
+      "fingerprint": "chrome",
+      "transport": "grpc",
+      "serviceName": "svc",
+      "path": "/ignored",
+      "host": "ignored.example.com"
+    },
+    "link": "vmess://eyJ2IjoiMiIsInBzIjoiIiwiYWRkIjoidm0uZXhhbXBsZS5jb20iLCJwb3J0IjoiODQ0MyIsImlkIjoiYmYwMDBkMjMtMDc1Mi00MGI0LWFmZmUtNjhmNzcwN2E5NjYxIiwiYWlkIjoiMCIsInNjeSI6ImF1dG8iLCJuZXQiOiJncnBjIiwidHlwZSI6Im5vbmUiLCJob3N0IjoiIiwicGF0aCI6InN2YyIsInRscyI6IiIsInNuaSI6IiIsImFscG4iOiIiLCJmcCI6IiIsImFsbG93SW5zZWN1cmUiOiIwIn0=",
+    "expect": {
+      "name": "vm.example.com:8443",
+      "node": {
+        "server": "vm.example.com",
+        "server_port": 8443,
+        "settings": {
+          "protocol": "vmess",
+          "security": "auto",
+          "tls": null,
+          "transport": {
+            "type": "grpc",
+            "service_name": "svc"
+          }
+        }
+      },
+      "credentials": {
+        "uuid": "bf000d23-0752-40b4-affe-68f7707a9661"
+      }
+    }
+  },
+  {
+    "case": "vless REALITY with Vision",
+    "form": {
+      "protocol": "vless",
+      "name": "REALITY",
+      "server": "vl.example.com",
+      "port": "443",
+      "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
+      "vision": true,
+      "security": "reality",
+      "sni": "www.example.com",
+      "insecure": true,
+      "alpn": "h2",
+      "fingerprint": "firefox",
+      "publicKey": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+      "shortId": "abcd"
+    },
+    "link": "vless://bf000d23-0752-40b4-affe-68f7707a9661@vl.example.com:443?encryption=none&security=reality&sni=www.example.com&fp=firefox&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0&sid=abcd&flow=xtls-rprx-vision#REALITY",
+    "expect": {
+      "name": "REALITY",
+      "node": {
+        "server": "vl.example.com",
+        "server_port": 443,
+        "settings": {
+          "protocol": "vless",
+          "flow": "xtls-rprx-vision",
+          "tls": {
+            "server_name": "www.example.com",
+            "insecure": false,
+            "fingerprint": "firefox",
+            "reality": {
+              "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+              "short_id": "abcd"
+            }
+          },
+          "transport": null
+        }
+      },
+      "credentials": {
+        "uuid": "bf000d23-0752-40b4-affe-68f7707a9661"
+      }
+    }
+  },
+  {
+    "case": "vless TLS over HTTPUpgrade",
+    "form": {
+      "protocol": "vless",
+      "server": "vl.example.com",
+      "port": "443",
+      "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
+      "security": "tls",
+      "sni": "sni.example.com",
+      "transport": "httpupgrade",
+      "path": "/up",
+      "host": "cdn.example.com"
+    },
+    "link": "vless://bf000d23-0752-40b4-affe-68f7707a9661@vl.example.com:443?encryption=none&security=tls&sni=sni.example.com&type=httpupgrade&path=%2Fup&host=cdn.example.com",
+    "expect": {
+      "name": "vl.example.com:443",
+      "node": {
+        "server": "vl.example.com",
+        "server_port": 443,
+        "settings": {
+          "protocol": "vless",
+          "flow": null,
+          "tls": {
+            "server_name": "sni.example.com",
+            "insecure": false,
+            "reality": null
+          },
+          "transport": {
+            "type": "httpupgrade",
+            "path": "/up",
+            "host": "cdn.example.com"
+          }
+        }
+      },
+      "credentials": {
+        "uuid": "bf000d23-0752-40b4-affe-68f7707a9661"
+      }
+    }
+  },
+  {
+    "case": "vless without TLS",
+    "form": {
+      "protocol": "vless",
+      "server": "vl.example.com",
+      "port": "80",
+      "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
+      "security": "none",
+      "sni": "ignored.example.com",
+      "publicKey": "ignored"
+    },
+    "link": "vless://bf000d23-0752-40b4-affe-68f7707a9661@vl.example.com:80?encryption=none&security=none",
+    "expect": {
+      "name": "vl.example.com:80",
+      "node": {
+        "server": "vl.example.com",
+        "server_port": 80,
+        "settings": {
+          "protocol": "vless",
+          "tls": null,
+          "transport": null
+        }
+      },
+      "credentials": {
+        "uuid": "bf000d23-0752-40b4-affe-68f7707a9661"
+      }
+    }
+  },
+  {
+    "case": "trojan over HTTP/2, skipping certificate verification",
+    "form": {
+      "protocol": "trojan",
+      "name": "Trojan",
+      "server": "tj.example.com",
+      "port": "443",
+      "password": "tr/oj:an+%",
+      "sni": "sni.example.com",
+      "insecure": true,
+      "transport": "h2",
+      "path": "/h2",
+      "host": "h2.example.com"
+    },
+    "link": "trojan://tr%2Foj%3Aan%2B%25@tj.example.com:443?security=tls&sni=sni.example.com&allowInsecure=1&type=h2&path=%2Fh2&host=h2.example.com#Trojan",
+    "expect": {
+      "name": "Trojan",
+      "node": {
+        "server": "tj.example.com",
+        "server_port": 443,
+        "settings": {
+          "protocol": "trojan",
+          "tls": {
+            "server_name": "sni.example.com",
+            "insecure": true
+          },
+          "transport": {
+            "type": "http",
+            "path": "/h2",
+            "host": [
+              "h2.example.com"
+            ]
+          }
+        }
+      },
+      "credentials": {
+        "password": "tr/oj:an+%"
+      }
+    }
+  },
+  {
+    "case": "hysteria2 with salamander",
+    "form": {
+      "protocol": "hysteria2",
+      "name": "HY2",
+      "server": "hy.example.com",
+      "port": "8443",
+      "password": "au/th",
+      "sni": "sni.example.com",
+      "insecure": true,
+      "alpn": "h3",
+      "obfsPassword": "ob+fs"
+    },
+    "link": "hysteria2://au%2Fth@hy.example.com:8443/?sni=sni.example.com&alpn=h3&insecure=1&obfs=salamander&obfs-password=ob%2Bfs#HY2",
+    "expect": {
+      "name": "HY2",
+      "node": {
+        "server": "hy.example.com",
+        "server_port": 8443,
+        "settings": {
+          "protocol": "hysteria2",
+          "obfs": "salamander",
+          "tls": {
+            "server_name": "sni.example.com",
+            "insecure": true,
+            "alpn": [
+              "h3"
+            ]
+          }
+        }
+      },
+      "credentials": {
+        "password": "au/th",
+        "obfs_password": "ob+fs"
+      }
+    }
+  },
+  {
+    "case": "hysteria2 without obfuscation",
+    "form": {
+      "protocol": "hysteria2",
+      "server": "hy.example.com",
+      "port": "443",
+      "password": "auth"
+    },
+    "link": "hysteria2://auth@hy.example.com:443/",
+    "expect": {
+      "name": "hy.example.com:443",
+      "node": {
+        "server": "hy.example.com",
+        "server_port": 443,
+        "settings": {
+          "protocol": "hysteria2",
+          "obfs": null,
+          "tls": {
+            "insecure": false
+          }
+        }
+      },
+      "credentials": {
+        "password": "auth"
+      }
+    }
+  },
+  {
+    "case": "tuic v5 with its own options",
+    "form": {
+      "protocol": "tuic",
+      "name": "TUIC",
+      "server": "tu.example.com",
+      "port": "443",
+      "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
+      "password": "pa:ss",
+      "sni": "sni.example.com",
+      "insecure": true,
+      "alpn": "h3",
+      "congestion": "new_reno",
+      "udpRelay": "quic"
+    },
+    "link": "tuic://bf000d23-0752-40b4-affe-68f7707a9661:pa%3Ass@tu.example.com:443?sni=sni.example.com&alpn=h3&allow_insecure=1&congestion_control=new_reno&udp_relay_mode=quic#TUIC",
+    "expect": {
+      "name": "TUIC",
+      "node": {
+        "server": "tu.example.com",
+        "server_port": 443,
+        "settings": {
+          "protocol": "tuic",
+          "congestion_control": "new_reno",
+          "udp_relay_mode": "quic",
+          "tls": {
+            "server_name": "sni.example.com",
+            "insecure": true,
+            "alpn": [
+              "h3"
+            ]
+          }
+        }
+      },
+      "credentials": {
+        "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
+        "password": "pa:ss"
+      }
+    }
+  },
+  {
+    "case": "anytls",
+    "form": {
+      "protocol": "anytls",
+      "name": "AnyTLS",
+      "server": "any.example.com",
+      "port": "443",
+      "password": "secret",
+      "sni": "sni.example.com"
+    },
+    "link": "anytls://secret@any.example.com:443/?sni=sni.example.com#AnyTLS",
+    "expect": {
+      "name": "AnyTLS",
+      "node": {
+        "server": "any.example.com",
+        "server_port": 443,
+        "settings": {
+          "protocol": "anytls",
+          "tls": {
+            "server_name": "sni.example.com",
+            "insecure": false
+          }
+        }
+      },
+      "credentials": {
+        "password": "secret"
+      }
+    }
+  },
+  {
+    "case": "socks5 with a username and password",
+    "form": {
+      "protocol": "socks",
+      "name": "SOCKS",
+      "server": "127.0.0.1",
+      "port": "1080",
+      "username": "us:er",
+      "password": "pa/ss"
+    },
+    "link": "socks5://us%3Aer:pa%2Fss@127.0.0.1:1080#SOCKS",
+    "expect": {
+      "name": "SOCKS",
+      "node": {
+        "server": "127.0.0.1",
+        "server_port": 1080,
+        "settings": {
+          "protocol": "socks"
+        }
+      },
+      "credentials": {
+        "username": "us:er",
+        "password": "pa/ss"
+      }
+    }
+  },
+  {
+    "case": "socks5 without authentication",
+    "form": {
+      "protocol": "socks",
+      "server": "127.0.0.1",
+      "port": "1080"
+    },
+    "link": "socks5://127.0.0.1:1080",
+    "expect": {
+      "name": "127.0.0.1:1080",
+      "node": {
+        "server": "127.0.0.1",
+        "server_port": 1080,
+        "settings": {
+          "protocol": "socks"
+        }
+      },
+      "credentials": {}
+    }
+  },
+  {
+    "case": "HTTP proxy with a username and password",
+    "form": {
+      "protocol": "http",
+      "name": "HTTP",
+      "server": "proxy.example.com",
+      "port": "8080",
+      "security": "none",
+      "username": "user",
+      "password": "pass"
+    },
+    "link": "http://user:pass@proxy.example.com:8080#HTTP",
+    "expect": {
+      "name": "HTTP",
+      "node": {
+        "server": "proxy.example.com",
+        "server_port": 8080,
+        "settings": {
+          "protocol": "http",
+          "tls": null
+        }
+      },
+      "credentials": {
+        "username": "user",
+        "password": "pass"
+      }
+    }
+  },
+  {
+    "case": "HTTPS proxy: TLS options cannot go in the link",
+    "form": {
+      "protocol": "http",
+      "server": "proxy.example.com",
+      "port": "8443",
+      "security": "tls",
+      "sni": "ignored.example.com",
+      "insecure": true
+    },
+    "link": "https://proxy.example.com:8443",
+    "expect": {
+      "name": "proxy.example.com:8443",
+      "node": {
+        "server": "proxy.example.com",
+        "server_port": 8443,
+        "settings": {
+          "protocol": "http",
+          "tls": {
+            "insecure": false
+          }
+        }
+      },
+      "credentials": {}
+    }
+  }
+]
