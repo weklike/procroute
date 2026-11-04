@@ -201,6 +201,7 @@ const zhCN = {
       name: '名称（可选）',
       namePlaceholder: '留空时显示「服务器:端口」',
       server: '服务器',
+      serverPlaceholder: '域名或 IP 地址',
       port: '端口',
       uuid: 'UUID',
       password: '密码',

@@ -217,6 +217,7 @@ const enUS: Messages = {
       name: 'Name (optional)',
       namePlaceholder: 'Shows server:port when empty',
       server: 'Server',
+      serverPlaceholder: 'Domain or IP address',
       port: 'Port',
       uuid: 'UUID',
       password: 'Password',

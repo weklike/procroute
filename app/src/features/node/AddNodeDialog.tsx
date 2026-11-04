@@ -162,7 +162,7 @@ export default function AddNodeDialog() {
                   {...p}
                   {...noAutofill}
                   className="font-mono"
-                  placeholder="node.example.com"
+                  placeholder={m('serverPlaceholder')}
                   {...register('server')}
                 />
               )}
