@@ -32,6 +32,10 @@ cargo xtask fetch-deps
 
 运行时服务同样按锁文件校验 `sing-box.exe` 后才启动它（C-SEC-06，T-056）。
 
+打包（`cargo xtask bundle`，T-110）把 `sing-box.exe` 原样装进安装目录、**不签名**：签名会改变文件的 SHA256，
+服务就会拒绝启动它。`xtask/bundle/sign.ps1` 明确跳过锁定的第三方二进制；`LICENSE` 装到安装目录的
+`licenses\sing-box-LICENSE`。
+
 ## 兼容性验证记录
 
 ### 1.14.4（初次锁定）
