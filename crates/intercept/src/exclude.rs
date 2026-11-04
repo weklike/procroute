@@ -12,7 +12,7 @@ use crate::flow::ProcessKey;
 
 /// 排除表：ProcRoute 自身的进程与当前代理服务器地址。
 ///
-/// 回环、链路本地、未指定地址不需要登记，[`ExclusionSet::excludes_ip`] 总是排除它们。
+/// 回环、链路本地、未指定、组播与广播地址不需要登记，[`ExclusionSet::excludes_ip`] 总是排除它们。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExclusionSet {
     /// sing-box、procroute-svc、procroute-ui 自身。
@@ -44,11 +44,23 @@ impl ExclusionSet {
     }
 }
 
-/// 回环、链路本地、未指定地址：无论配置如何都不改道。
+/// 回环、链路本地、未指定、组播与广播地址：无论配置如何都不改道。组播与广播是局域网内的发现协议
+/// （SSDP、mDNS 等），送进代理没有意义（与 TUN 模式配置里的排除网段一致）。
 pub fn is_always_excluded(ip: IpAddr) -> bool {
     match canonical(ip) {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.is_unspecified(),
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unicast_link_local() || v6.is_unspecified(),
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+        }
     }
 }
 
@@ -67,7 +79,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loopback_link_local_and_unspecified_are_always_excluded() {
+    fn local_only_addresses_are_always_excluded() {
         let empty = ExclusionSet::default();
         for ip in [
             "127.0.0.1",
@@ -78,6 +90,10 @@ mod tests {
             "fe80::1",
             "::",
             "::ffff:127.0.0.1",
+            "239.255.255.250",
+            "224.0.0.251",
+            "255.255.255.255",
+            "ff02::fb",
         ] {
             assert!(empty.excludes_ip(ip.parse().unwrap()), "{ip}");
         }
