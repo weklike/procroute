@@ -40,7 +40,7 @@ crates/
   platform-win/  Windows API 封装：路径规范化、DPAPI、ACL、服务控制      [Windows；Secret<T> 跨平台]
   svc/           二进制：Windows 服务入口，唯一的组装点                 [Windows]
 app/
-  src-tauri/     Rust（包名 procroute-ui）：控制管道客户端 ipc.rs、窗口 / 托盘 / 开机自启 shell.rs、诊断包存盘 diag.rs（只依赖 proto）
+  src-tauri/     Rust（包名 procroute-ui）：控制管道客户端 ipc.rs、窗口 / 托盘 / 开机自启 / 文件夹对话框 shell.rs、诊断包存盘 diag.rs（只依赖 proto）
   src/           React 19 + TypeScript
     routes/        页面与路由定义（TanStack Router）
     features/      按领域划分：session/ profile/ node/ conn/ log/ shell/ settings/，各自含 api.ts（Query hooks）与组件
