@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `cargo xtask sandbox-install [--keep-open] [--timeout-mins <分钟>]`
+//! `cargo xtask sandbox-install [--installer <安装器>] [--upgrade-from <旧安装器>] [--keep-open] [--timeout-mins <分钟>]`
 //!
-//! 在 Windows Sandbox 里验证 `cargo xtask bundle` 打出的安装器（T-110，验收「安装 → 卸载后无残留」）。
+//! 在 Windows Sandbox 里验证安装器（T-110，验收「安装 → 升级 → 卸载后无残留」）。默认验证 `cargo xtask bundle`
+//! 打出的安装器，`--installer` 可以指定别处的，例如从 GitHub Release 下载的。
 //! 开发机上不安装、不注册服务、不加载驱动（AGENTS 第 8 节第 5 条；2026-11-04 定由用户自己在本机安装）。
 //!
-//! 沙盒里由 `xtask/sandbox/install.ps1`：信任本机签名证书（用户在本机做的那一步）→ 静默安装 → 检查文件、签名、
-//! 服务（自动启动、LocalSystem、控制管道）→ 启动界面，确认签过名的界面被服务接受（C-SEC-02）→ 静默卸载 →
-//! 检查服务、程序文件、进程、WinDivert 驱动、防火墙规则与开机自启项都没有留下（C-NET-06）。
+//! 沙盒里由 `xtask/sandbox/install.ps1`：（给了 `--upgrade-from` 时先装旧版并运行其界面）→ 静默安装 → 检查文件、
+//! 签名、服务（自动启动、LocalSystem、控制管道）→ 启动界面，确认没有信任任何证书时签过名的界面被服务接受（C-SEC-02，
+//! ADR 0002）→ 安装目录里主题相同、证书不同的界面被拒绝 → 静默卸载 → 检查服务、程序文件、进程、WinDivert 驱动、
+//! 防火墙规则与开机自启项都没有留下（C-NET-06）。
 //!
 //! 沙盒镜像没有 WebView2、也上不了外网：与 `sandbox-dev` 一样映射开发机的运行时，并登记它的版本，
 //! 免得安装器去下载引导程序。
 
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -41,10 +44,14 @@ struct Step {
 pub fn run(args: &[String]) -> Result<()> {
     let mut keep_open = false;
     let mut timeout = Duration::from_secs(15 * 60);
+    let mut installer = None;
+    let mut upgrade_from = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--keep-open" => keep_open = true,
+            "--installer" => installer = Some(path_value(it.next(), a)?),
+            "--upgrade-from" => upgrade_from = Some(path_value(it.next(), a)?),
             "--timeout-mins" => {
                 let mins: u64 = match it.next().map(|v| v.parse()) {
                     Some(Ok(m)) if m > 0 => m,
@@ -56,12 +63,19 @@ pub fn run(args: &[String]) -> Result<()> {
         }
     }
     let root = crate::workspace_root();
-    let bundle = root.join("target").join("bundle");
-    let installer = fs::read_dir(&bundle)
-        .with_context(|| format!("读取 {}（先运行 `cargo xtask bundle`）", bundle.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .find(|p| p.to_string_lossy().ends_with("-setup.exe"))
-        .context("target/bundle 里没有安装器，先运行 `cargo xtask bundle`")?;
+    let installer = match installer {
+        Some(path) => path,
+        None => {
+            let bundle = root.join("target").join("bundle");
+            fs::read_dir(&bundle)
+                .with_context(|| {
+                    format!("读取 {}（先运行 `cargo xtask bundle`）", bundle.display())
+                })?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .find(|p| p.to_string_lossy().ends_with("-setup.exe"))
+                .context("target/bundle 里没有安装器，先运行 `cargo xtask bundle`")?
+        }
+    };
 
     sandbox::ensure_idle()?;
     let base = root.join("target").join("sandbox");
@@ -70,10 +84,16 @@ pub fn run(args: &[String]) -> Result<()> {
     sandbox::recreate(&input)?;
     sandbox::recreate(&output)?;
     let name = installer.file_name().context("安装器没有文件名")?;
-    fs::copy(&installer, input.join(name)).context("复制安装器")?;
-    let cer = bundle.join(crate::bundle::CERT_FILE);
-    fs::copy(&cer, input.join(crate::bundle::CERT_FILE))
-        .with_context(|| format!("复制 {}", cer.display()))?;
+    fs::copy(&installer, input.join(name))
+        .with_context(|| format!("复制 {}", installer.display()))?;
+    if let Some(previous) = &upgrade_from {
+        let dir = input.join("upgrade-from");
+        fs::create_dir_all(&dir)?;
+        let name = previous.file_name().context("旧安装器没有文件名")?;
+        fs::copy(previous, dir.join(name))
+            .with_context(|| format!("复制 {}", previous.display()))?;
+        println!("先安装旧版：{}", previous.display());
+    }
     fs::write(input.join("install.ps1"), INSTALL_PS1)?;
     if keep_open {
         fs::write(input.join("keep-open"), "")?;
@@ -124,6 +144,15 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     println!("全部 {} 项检查通过", report.steps.len());
     Ok(())
+}
+
+fn path_value(value: Option<&String>, flag: &str) -> Result<PathBuf> {
+    let path = value.with_context(|| format!("{flag} 需要一个文件路径"))?;
+    let path = PathBuf::from(path);
+    if !path.to_string_lossy().ends_with("-setup.exe") || !path.is_file() {
+        bail!("{flag}：{} 不是安装器文件", path.display());
+    }
+    Ok(path)
 }
 
 #[cfg(test)]

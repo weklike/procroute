@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# 发版：在 GitHub 上发布 Release 时，先跑一遍 CI，再按 tag 的版本打包 Windows 安装器，把安装器、校验和与
+# 来源证明放到这个 Release 上。重跑：gh workflow run release.yml --ref <tag>。
+# 改动打包相关文件的 PR 只打包不发布，安装器留在这次运行的 artifact 里，供 cargo xtask sandbox-install 验证。
+#
+# 不需要任何密钥：每次打包都新建一次性自签名证书，用完连同私钥删除（docs/adr/0002）。
+# 打包这一步会运行大量第三方构建脚本，所以它只有只读权限；能写 Release 的 publish 只处理打好的文件。
+# 不用缓存：发布的二进制不依赖之前运行留下的任何内容。
+# 注意（C-TEST-04）：CI 宿主上不安装、不注册服务，安装器的验证在 Windows Sandbox 里做。
+name: release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/release-notes.md
+      - .github/workflows/release.yml
+      - app/src-tauri/**
+      - third_party/*/lock.json
+      - xtask/**
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    # PR 上 ci.yml 已经在跑
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: 打包安装器
+    needs: ci
+    # 上面的 ci 被跳过不算失败
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 rust-toolchain.toml 锁定的工具链
+        run: rustup show
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: pnpm -C app install --frozen-lockfile
+      - name: 拉取并校验锁定版本的 sing-box、WinDivert（C-DEP-04、C-DRV-01）
+        run: cargo xtask fetch-deps
+      - name: 版本号跟随 tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cargo xtask set-version "$env:GITHUB_REF_NAME"
+      - run: cargo xtask bundle
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: target/bundle/
+          if-no-files-found: error
+
+  publish:
+    name: 上传到 Release
+    needs: build
+    if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-installer
+          path: dist
+      # 一次性证书不能说明安装器出自谁手，来源由 GitHub 的构建证明回答（gh attestation verify）
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*-setup.exe
+      - name: 上传安装器与校验和
+        run: gh release upload "$TAG" dist/* --clobber
+      - name: 在发行说明后追加安装说明、校验和与源码链接
+        # 重跑时替换上次追加的部分，发版人自己写的内容不动；网页编辑过的说明是 CRLF
+        run: |
+          marker='<!-- procroute-release-notes -->'
+          installer=$(basename dist/*-setup.exe)
+          sha256=$(cut -d' ' -f1 dist/SHA256SUMS.txt)
+          gh release view "$TAG" --json body --jq .body | sed "/^$marker\r\?\$/,\$d" > notes.md
+          echo "$marker" >> notes.md
+          sed -e "s|{{TAG}}|$TAG|g" -e "s|{{REPO}}|$GH_REPO|g" \
+              -e "s|{{INSTALLER}}|$installer|g" -e "s|{{SHA256}}|$sha256|g" \
+              .github/release-notes.md >> notes.md
+          gh release edit "$TAG" --notes-file notes.md

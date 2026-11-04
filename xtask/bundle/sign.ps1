@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Signs one file with the local code-signing certificate (T-110). Used by `cargo xtask bundle` for the
+# Signs one file with the bundle's one-off code-signing certificate (T-110, ADR 0002). Used by `cargo xtask bundle` for the
 # service binary and, through Tauri's signCommand, for every binary the bundler packs: the UI, the NSIS
 # plugins, the uninstaller and the installer. This script is the whole signing policy:
 # - the hash-locked third-party binaries (sing-box, WinDivert) are never signed: a signature would change
@@ -18,8 +18,8 @@ $thumb = $env:PROCROUTE_SIGN_THUMBPRINT
 if (-not $thumb) { throw 'PROCROUTE_SIGN_THUMBPRINT is not set (run through cargo xtask bundle)' }
 $cert = Get-Item "Cert:\CurrentUser\My\$thumb"
 $result = Set-AuthenticodeSignature -FilePath $Path -Certificate $cert -HashAlgorithm SHA256
-# A self-signed root is not trusted on the build machine until the user trusts it, so the status may be
-# UnknownError; the file is signed all the same. Anything else, or a different signer, is a failure.
+# Nothing trusts the one-off self-signed certificate, so the status is UnknownError; the file is signed
+# all the same. Anything else, or a different signer, is a failure.
 $signed = $result.SignerCertificate -and $result.SignerCertificate.Thumbprint -eq $thumb
 if (-not $signed -or ($result.Status -ne 'Valid' -and $result.Status -ne 'UnknownError')) {
     throw "signing $Path failed: $($result.Status) $($result.StatusMessage)"
