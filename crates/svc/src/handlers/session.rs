@@ -431,10 +431,20 @@ fn stop_backend(backend: &SharedBackend) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take();
-    if let Some(mut b) = taken
-        && let Err(e) = b.stop()
-    {
-        tracing::warn!(error = %e, "stopping the interception backend failed");
+    if let Some(mut b) = taken {
+        // 计数器都是流的条数，不含地址。`attribution_miss` 是泄漏测试的判据之一（C-TEST-02）
+        let stats = b.stats();
+        tracing::info!(
+            redirected = stats.redirected,
+            bypassed = stats.bypassed,
+            blocked = stats.blocked,
+            attribution_miss = stats.attribution_miss,
+            events_dropped = stats.events_dropped,
+            "interception counters at session end"
+        );
+        if let Err(e) = b.stop() {
+            tracing::warn!(error = %e, "stopping the interception backend failed");
+        }
     }
 }
 
