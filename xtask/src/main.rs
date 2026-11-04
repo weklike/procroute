@@ -18,6 +18,7 @@ mod sandbox_dev;
 mod sandbox_install;
 #[cfg(windows)]
 mod sandbox_test;
+mod set_version;
 
 const HELP: &str = "\
 用法：cargo xtask <命令>
@@ -30,10 +31,13 @@ const HELP: &str = "\
   sandbox-test [--only <测试名>]... [--keep-open] [--timeout-mins <分钟>]
                       在 Windows Sandbox 中运行只允许在虚拟机里运行的测试
                       （驱动、WFP、管理员权限，C-TEST-04）
-  bundle              打包 Windows 安装器：本机自签名证书签名服务、界面与安装器，
+  set-version <版本或 tag>
+                      把工作区与前端的版本号改成指定版本（v1.2.3、v1.2、1.2.3）
+  bundle              打包 Windows 安装器：一次性自签名证书签名服务、界面与安装器，
                       输出到 target/bundle（Windows）
-  sandbox-install [--keep-open] [--timeout-mins <分钟>]
-                      在 Windows Sandbox 中验证安装器：安装、服务与界面、卸载后无残留
+  sandbox-install [--installer <安装器>] [--upgrade-from <旧安装器>] [--keep-open] [--timeout-mins <分钟>]
+                      在 Windows Sandbox 中验证安装器：安装（可先装旧版）、服务与界面、
+                      伪造界面被拒绝、卸载后无残留
   sandbox-dev [--timeout-mins <分钟>]
                       在 Windows Sandbox 中以控制台模式运行真实的服务与界面，
                       供手动联调（沙盒保持打开，关窗口即结束）
@@ -53,6 +57,7 @@ fn main() -> ExitCode {
         }
         Some("gen-types") => gen_types::run(flag("--check")),
         Some("fetch-deps") => fetch_deps::run(),
+        Some("set-version") => set_version::run(&args[1..]),
         #[cfg(windows)]
         Some("sandbox-test") => sandbox_test::run(&args[1..]),
         #[cfg(not(windows))]

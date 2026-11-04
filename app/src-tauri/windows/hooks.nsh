@@ -9,8 +9,8 @@
 ; - Before uninstalling, the service is stopped and deleted: the service exiting closes its WinDivert
 ;   handles and withdraws every filter (C-NET-06), and sing-box ends with its job object. The UI's
 ;   autostart entry is removed too. The configuration in %ProgramData%\ProcRoute is kept.
-; The installer never changes certificate trust: the user trusts the local signing certificate in a
-; separate, explicit step (decided 2026-11-04).
+; The installer never changes certificate trust, and nothing needs it to: the service only requires the
+; UI to be signed with its own certificate (ADR 0002).
 
 !macro NSIS_HOOK_PREINSTALL
   nsExec::ExecToLog 'net.exe stop ProcRoute'

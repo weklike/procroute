@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # `cargo xtask sandbox-install`, run inside Windows Sandbox as the logon command: installs the bundled
-# installer silently, checks the service and the signed UI, uninstalls, and checks nothing is left
-# behind (T-110). Results go to C:\procroute-out\install.json, then the sandbox shuts down.
+# installer silently (over a previous version when one is given), checks the service and the signed UI
+# on a machine that trusts no ProcRoute certificate, checks that a forged UI is rejected, uninstalls,
+# and checks nothing is left behind (T-110, ADR 0002). Results go to C:\procroute-out\install.json,
+# then the sandbox shuts down.
 # Strings stay ASCII: Windows PowerShell 5.1 reads scripts without a BOM in the ANSI code page.
 
 $ErrorActionPreference = 'Stop'
@@ -32,9 +34,6 @@ try {
     $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     $result.admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-    # What the user does once on the host: trust the local signing certificate machine-wide
-    Import-Certificate -FilePath (Join-Path $inDir 'procroute-local-signing.cer') -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-
     # The sandbox image has no WebView2 runtime and no internet: use the host's runtime as a fixed-version
     # runtime and register its version so the installer does not try to download the bootstrapper
     if (Test-Path (Join-Path $hostWebView2 'msedgewebview2.exe')) {
@@ -47,6 +46,19 @@ try {
         [Environment]::SetEnvironmentVariable('WEBVIEW2_BROWSER_EXECUTABLE_FOLDER', $localWebView2, 'Machine')
     }
 
+    # 0. A previous version with its UI running, when testing an upgrade: every release has its own
+    # certificate, so the service and the UI must change certificate together
+    $previous = Get-ChildItem (Join-Path $inDir 'upgrade-from') -Filter '*-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $previousCert = $null
+    if ($previous) {
+        $p = Start-Process -FilePath $previous.FullName -ArgumentList '/S' -Wait -PassThru
+        Step "previous version $($previous.Name) installs" ($p.ExitCode -eq 0) $p.ExitCode
+        Step 'previous version service runs' (Wait-Until { (Get-Service ProcRoute -ErrorAction SilentlyContinue).Status -eq 'Running' } 30) ''
+        $previousCert = (Get-AuthenticodeSignature (Join-Path $install 'procroute-svc.exe')).SignerCertificate.Thumbprint
+        Start-Process -FilePath (Join-Path $install 'procroute-ui.exe') | Out-Null
+        Start-Sleep -Seconds 5
+    }
+
     # 1. Silent install
     $setup = Get-ChildItem $inDir -Filter '*-setup.exe' | Select-Object -First 1
     $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
@@ -54,9 +66,17 @@ try {
     foreach ($f in 'procroute-ui.exe', 'procroute-svc.exe', 'sing-box.exe', 'WinDivert.dll', 'WinDivert64.sys', 'licenses\NOTICE') {
         Step "installed $f" (Test-Path (Join-Path $install $f)) ''
     }
+    # Intact (no HashMismatch), and all with one certificate. UnknownError is what PowerShell reports for
+    # a good signature whose root is not trusted, which is the expected state of the one-off certificate.
+    $signer = (Get-AuthenticodeSignature (Join-Path $install 'procroute-svc.exe')).SignerCertificate
     foreach ($f in 'procroute-ui.exe', 'procroute-svc.exe', 'uninstall.exe') {
         $sig = Get-AuthenticodeSignature (Join-Path $install $f)
-        Step "signature of $f is valid" ($sig.Status -eq 'Valid') "$($sig.Status) $($sig.SignerCertificate.Subject)"
+        $good = (@('Valid', 'UnknownError') -contains $sig.Status) -and ($sig.SignerCertificate.Thumbprint -eq $signer.Thumbprint)
+        Step "$f is intact and signed with the service's certificate" $good "$($sig.Status) $($sig.SignerCertificate.Subject)"
+    }
+    Step 'no root trust is needed: the certificate is not in the machine root store' (-not (Test-Path "Cert:\LocalMachine\Root\$($signer.Thumbprint)")) $signer.Thumbprint
+    if ($previous) {
+        Step 'the upgrade replaced the signing certificate' ($previousCert -ne $signer.Thumbprint) "$previousCert -> $($signer.Thumbprint)"
     }
 
     # 2. The service is registered, automatic, running, and listening
@@ -68,18 +88,33 @@ try {
 
     # 3. The signed UI is accepted (client check, C-SEC-02): restart the service with debug logs first
     New-ItemProperty -Path $serviceKey -Name Environment -PropertyType MultiString -Value @('PROCROUTE_LOG=debug') -Force | Out-Null
+    # The log survives an upgrade: only what this version wrote counts
+    $logStart = if (Test-Path $svcLog) { (Get-Content $svcLog -Raw).Length } else { 0 }
     Restart-Service ProcRoute
     Wait-Until { Test-Pipe } 15 | Out-Null
     $ui = Start-Process -FilePath (Join-Path $install 'procroute-ui.exe') -PassThru
     $accepted = Wait-Until { (Test-Path $svcLog) -and ((Get-Content $svcLog -Raw) -match "pid=$($ui.Id) .*pipe client connected|pipe client connected.*pid=$($ui.Id)") } 30
     $log = if (Test-Path $svcLog) { Get-Content $svcLog -Raw } else { '' }
     Step 'the signed UI is accepted by the service' $accepted "ui pid $($ui.Id)"
-    Step 'no pipe client was rejected' (-not ($log -match 'pipe client rejected')) ''
+    Step 'no pipe client was rejected' (-not ($log.Substring([Math]::Min($logStart, $log.Length)) -match 'pipe client rejected')) ''
     Step 'the UI is still running' (-not $ui.HasExited) ''
     Copy-Item $svcLog (Join-Path $outDir 'svc-installed.log') -ErrorAction SilentlyContinue
 
-    # 4. Silent uninstall
+    # 4. A UI inside the install directory, signed with another certificate with the same subject, is rejected
     Stop-Process -Id $ui.Id -Force -ErrorAction SilentlyContinue
+    $forgedPath = Join-Path $install 'procroute-ui-forged.exe'
+    Copy-Item (Join-Path $install 'procroute-ui.exe') $forgedPath
+    $forgedCert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $signer.Subject -CertStoreLocation Cert:\CurrentUser\My
+    Set-AuthenticodeSignature -FilePath $forgedPath -Certificate $forgedCert -HashAlgorithm SHA256 | Out-Null
+    $forged = Start-Process -FilePath $forgedPath -PassThru
+    $rejected = Wait-Until { (Get-Content $svcLog -Raw) -match "pipe client rejected.*pid=$($forged.Id) .*different certificate" } 30
+    Step 'a UI signed with another certificate with the same subject is rejected' $rejected "forged pid $($forged.Id)"
+    Copy-Item $svcLog (Join-Path $outDir 'svc-forged.log') -ErrorAction SilentlyContinue
+    Stop-Process -Id $forged.Id -Force -ErrorAction SilentlyContinue
+    Wait-Until { -not (Get-Process -Id $forged.Id -ErrorAction SilentlyContinue) } 10 | Out-Null
+    Remove-Item $forgedPath -Force
+
+    # 5. Silent uninstall
     Start-Process -FilePath (Join-Path $install 'uninstall.exe') -ArgumentList '/S' -Wait
     $gone = Wait-Until { -not (Get-Service ProcRoute -ErrorAction SilentlyContinue) -and -not (Test-Path (Join-Path $install 'procroute-svc.exe')) } 60
     Step 'uninstall removes the service and the program files' $gone ''
