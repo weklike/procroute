@@ -88,7 +88,7 @@ pub fn run(args: &[String]) -> Result<()> {
 }
 
 /// 开发机上系统级安装的 WebView2 运行时的版本目录，有多个时取版本号最大的。
-fn host_webview2() -> Option<PathBuf> {
+pub(crate) fn host_webview2() -> Option<PathBuf> {
     let base = PathBuf::from(std::env::var_os("ProgramFiles(x86)")?)
         .join(r"Microsoft\EdgeWebView\Application");
     fs::read_dir(base)

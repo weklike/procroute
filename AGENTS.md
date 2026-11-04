@@ -89,7 +89,7 @@ Crate 的包名统一为 `procroute-<目录名>`，例如 `crates/rules` → `pr
 | 驱动相关测试（只在虚拟机） | 管理员终端：`cargo nextest run -p procroute-intercept --features vm-tests`（会安装并加载 WinDivert 驱动，禁止在开发机上运行，C-TEST-04） |
 | 本地开发运行 | 开发机：`pnpm -C app dev`（浏览器里打开，模拟 IPC，不连真实服务）；桌面外壳：PowerShell 里 `$env:VITE_IPC_MOCK='1'; pnpm -C app exec tauri dev`（同样用模拟 IPC；`tauri` 不是 package.json 里的脚本，要经 `exec`）；完整联调：开发机上运行 `cargo xtask sandbox-dev`（在 Windows Sandbox 里以控制台模式运行真实的 svc 与界面，沙盒保持打开，关窗口即结束），或在装有工具链的测试虚拟机里运行 `cargo xtask dev`（控制台模式启动 svc + `tauri dev`，需要管理员终端，会加载驱动，禁止在开发机上运行，见第 8 节第 5 条） |
 | 构建桌面客户端 | `pnpm -C app tauri build --debug --no-bundle`（先跑前端生产构建，再编译 `procroute-ui.exe`；不出安装包） |
-| 打包安装包 | `cargo xtask bundle` |
+| 打包安装包 | `cargo xtask bundle`（Windows；需要 PowerShell 7。用本机自签名证书签名服务、界面与安装器，输出到 `target/bundle`；安装前以管理员身份运行一次同目录的 `trust-signing-cert.ps1`）；验证：`cargo xtask sandbox-install`（在 Windows Sandbox 里安装、检查服务与界面、卸载后检查无残留；开发机上不安装） |
 | 端到端测试 | `cargo xtask e2e --vm <name>`（只在 Hyper-V 虚拟机中运行） |
 | 虚拟机专属测试（驱动、WFP、管理员） | `cargo xtask sandbox-test [--only <测试名>] [--keep-open]`（在开发机上编译，在 Windows Sandbox 里运行；需要启用「Windows 沙盒」功能） |
 | 依赖与许可审计 | `cargo deny check` ；`pnpm -C app audit` |
