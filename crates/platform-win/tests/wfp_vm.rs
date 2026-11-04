@@ -12,7 +12,7 @@ use std::io::ErrorKind;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
-use procroute_platform_win::wfp::{FailClosedFilters, TunRanges};
+use procroute_platform_win::wfp::{FailClosedFilters, ProtocolFilters, TunRanges};
 
 const TUN: TunRanges = TunRanges {
     v4: (Ipv4Addr::new(198, 18, 0, 1), 30),
@@ -45,4 +45,22 @@ fn protected_executables_are_blocked_outside_the_tun_but_keep_loopback() {
         !matches!(&after, Err(e) if e.kind() == ErrorKind::PermissionDenied),
         "filters must be gone: {after:?}"
     );
+}
+
+#[test]
+fn protocol_filters_leave_tcp_alone() {
+    // 只挡 TCP、UDP 以外的协议：挡了本进程之后 TCP 照常，回环上照常。ICMP 被挡住的效果在 leak_e2e 里验证
+    let exe = std::env::current_exe().expect("current exe");
+    let mut filters = ProtocolFilters::open().expect("open (needs an elevated prompt)");
+    filters.block_other_protocols(&exe).expect("block");
+    filters.block_ping().expect("block ping");
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    TcpStream::connect_timeout(&addr, Duration::from_secs(5)).expect("loopback TCP");
+    // 发往外部的 TCP：连得上或超时都行（看网络），只是不能被过滤器拒绝
+    if let Err(e) = TcpStream::connect_timeout(&outside(), Duration::from_millis(500)) {
+        assert_ne!(e.kind(), ErrorKind::PermissionDenied, "{e}");
+    }
+    drop(filters);
 }

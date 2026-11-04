@@ -12,6 +12,15 @@
 //! LUID 变了也不受影响。会话是动态的：服务关闭句柄或进程退出时，系统删除这里加的全部对象，不会留下
 //! 持久的过滤器（C-NET-06）。只影响列出的可执行文件，其他进程不受影响（C-NET-02）。
 //!
+//! [`ProtocolFilters`] 处理拦截层管不到的协议（精确模式）：
+//!
+//! - 目标可执行文件的 TCP、UDP 以外的协议（原始套接字发的 ICMP 等，C-NET-07）；
+//! - 用户选择时，所有进程发往外部的回显请求（ping，docs/adr/0003）。系统 ping 接口发的包在 `ALE_AUTH_CONNECT`
+//!   上的进程是 System（PID 4），只能全部一起挡。
+//!
+//! 都在 `ALE_AUTH_CONNECT` 判定：包发出之前同步决定，没有首包竞态，也不用抓其他进程的包。回环、链路本地、组播与
+//! 广播放行（C-NET-05）；只挡回显请求，IPv6 邻居发现这类协议运转需要的 ICMPv6 不受影响。
+//!
 //! 加过滤器需要管理员权限，且会改变网络行为：相关测试只在虚拟机里跑（`--features vm-tests`，C-TEST-04）。
 #![allow(unsafe_code)] // 需要调用 Fwpm* 系列函数；每处都有 SAFETY 注释
 
@@ -23,9 +32,10 @@ use std::ptr;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0,
-    FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK,
-    FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0, FWPM_ACTION0, FWPM_ACTION0_0,
-    FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_IP_LOCAL_ADDRESS, FWPM_CONDITION_IP_REMOTE_ADDRESS,
+    FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_UINT8, FWP_UINT16, FWP_V4_ADDR_AND_MASK,
+    FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
+    FWPM_ACTION0, FWPM_ACTION0_0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_IP_LOCAL_ADDRESS,
+    FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL, FWPM_CONDITION_IP_REMOTE_ADDRESS,
     FWPM_DISPLAY_DATA0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAG_NONE, FWPM_FILTER0,
     FWPM_FILTER0_0, FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
     FWPM_SESSION_FLAG_DYNAMIC, FWPM_SESSION0, FWPM_SUBLAYER0, FwpmEngineClose0, FwpmEngineOpen0,
@@ -48,7 +58,15 @@ const SUBLAYER_WEIGHT: u16 = 0x7fff;
 /// 子层内各过滤器的权重：放行高于阻断。
 const WEIGHT_PERMIT_TUN: u8 = 15;
 const WEIGHT_PERMIT_LOCAL: u8 = 14;
+const WEIGHT_PERMIT_TRANSPORT: u8 = 15;
 const WEIGHT_BLOCK: u8 = 1;
+
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const IPPROTO_ICMPV6: u8 = 58;
+const ICMP_ECHO_REQUEST: u16 = 8;
+const ICMPV6_ECHO_REQUEST: u16 = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{call} failed with error {code:#010x}")]
@@ -74,23 +92,24 @@ pub struct TunRanges {
 
 /// 动态 WFP 会话。丢弃（或进程退出）时系统删除其中的全部过滤器与子层。
 #[derive(Debug)]
-pub struct FailClosedFilters {
-    engine: HANDLE,
-    tun: TunRanges,
+struct Engine {
+    handle: HANDLE,
+    /// 子层与过滤器的显示名，排查时用。
+    name: Vec<u16>,
 }
 
-// SAFETY: 引擎句柄可以在线程间传递；本类型的方法都要 `&mut self`，同一时刻只有一个线程使用它。
-unsafe impl Send for FailClosedFilters {}
+// SAFETY: 引擎句柄可以在线程间传递；持有它的类型的方法都要 `&mut self`，同一时刻只有一个线程使用它。
+unsafe impl Send for Engine {}
 
-impl FailClosedFilters {
+impl Engine {
     /// 打开动态会话并添加子层。需要管理员权限。
-    pub fn open(tun: TunRanges) -> Result<Self, WfpError> {
-        let name = to_wide("ProcRoute fail-closed");
+    fn open(display_name: &str) -> Result<Self, WfpError> {
+        let name = to_wide(display_name);
         // SAFETY: FWPM_SESSION0 是纯数据结构，全零合法；下面填上需要的字段。
         let mut session: FWPM_SESSION0 = unsafe { std::mem::zeroed() };
         session.flags = FWPM_SESSION_FLAG_DYNAMIC;
         session.displayData.name = name.as_ptr().cast_mut();
-        let mut engine: HANDLE = ptr::null_mut();
+        let mut handle: HANDLE = ptr::null_mut();
         // SAFETY: 本机引擎（服务器名为空）；认证身份为空表示当前进程身份；`session` 与其中的名字在调用期间有效。
         check("FwpmEngineOpen0", unsafe {
             FwpmEngineOpen0(
@@ -98,114 +117,44 @@ impl FailClosedFilters {
                 RPC_C_AUTHN_WINNT,
                 ptr::null(),
                 &session,
-                &mut engine,
+                &mut handle,
             )
         })?;
-        let filters = Self { engine, tun };
+        let engine = Self { handle, name };
         // SAFETY: 全零的子层结构合法；下面填上需要的字段。
         let mut sublayer: FWPM_SUBLAYER0 = unsafe { std::mem::zeroed() };
         sublayer.subLayerKey = SUBLAYER_KEY;
         sublayer.displayData = FWPM_DISPLAY_DATA0 {
-            name: name.as_ptr().cast_mut(),
+            name: engine.name.as_ptr().cast_mut(),
             description: ptr::null_mut(),
         };
         sublayer.weight = SUBLAYER_WEIGHT;
         // SAFETY: 引擎句柄有效；`sublayer` 与名字在调用期间有效；不设安全描述符。
         check("FwpmSubLayerAdd0", unsafe {
-            FwpmSubLayerAdd0(filters.engine, &sublayer, ptr::null_mut())
+            FwpmSubLayerAdd0(engine.handle, &sublayer, ptr::null_mut())
         })?;
-        Ok(filters)
+        Ok(engine)
     }
 
-    /// 为一个可执行文件装上 fail-closed 过滤器（IPv4 与 IPv6 各三条，一个事务内完成）。
-    pub fn protect(&mut self, exe: &Path) -> Result<(), WfpError> {
-        let app = AppId::from_path(exe)?;
+    /// 在一个事务内加一组过滤器：要么全部生效，要么都不生效。
+    fn transaction(&self, add: impl FnOnce() -> Result<(), WfpError>) -> Result<(), WfpError> {
         // SAFETY: 引擎句柄有效；标志 0 表示读写事务。
         check("FwpmTransactionBegin0", unsafe {
-            FwpmTransactionBegin0(self.engine, 0)
+            FwpmTransactionBegin0(self.handle, 0)
         })?;
-        match self.add_all(&app) {
+        match add() {
             Ok(()) => {
                 // SAFETY: 引擎句柄有效，上面开启了事务。
                 check("FwpmTransactionCommit0", unsafe {
-                    FwpmTransactionCommit0(self.engine)
+                    FwpmTransactionCommit0(self.handle)
                 })
             }
             Err(e) => {
                 // SAFETY: 同上；放弃事务里已经加的过滤器。
-                unsafe { FwpmTransactionAbort0(self.engine) };
+                unsafe { FwpmTransactionAbort0(self.handle) };
                 Err(e)
             }
         }
-    }
-
-    fn add_all(&self, app: &AppId) -> Result<(), WfpError> {
-        let (v4, v4_len) = self.tun.v4;
-        let (v6, v6_len) = self.tun.v6;
-        let mut tun4 = v4_mask(v4, v4_len);
-        let mut tun6 = v6_mask(v6, v6_len);
-        let mut local4 = [
-            v4_mask(Ipv4Addr::new(127, 0, 0, 0), 8),
-            v4_mask(Ipv4Addr::new(169, 254, 0, 0), 16),
-            v4_mask(Ipv4Addr::new(224, 0, 0, 0), 4),
-            v4_mask(Ipv4Addr::BROADCAST, 32),
-        ];
-        let mut local6 = [
-            v6_mask(Ipv6Addr::LOCALHOST, 128),
-            v6_mask(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
-            v6_mask(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
-        ];
-        let app_cond = || app.condition();
-
-        // IPv4
-        let mut c = [app_cond(), local_v4(&mut tun4)];
-        self.add(
-            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            &mut c,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT_TUN,
-        )?;
-        let mut c: Vec<_> = std::iter::once(app_cond())
-            .chain(local4.iter_mut().map(remote_v4))
-            .collect();
-        self.add(
-            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            &mut c,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT_LOCAL,
-        )?;
-        let mut c = [app_cond()];
-        self.add(
-            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            &mut c,
-            FWP_ACTION_BLOCK,
-            WEIGHT_BLOCK,
-        )?;
-
-        // IPv6
-        let mut c = [app_cond(), local_v6(&mut tun6)];
-        self.add(
-            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            &mut c,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT_TUN,
-        )?;
-        let mut c: Vec<_> = std::iter::once(app_cond())
-            .chain(local6.iter_mut().map(remote_v6))
-            .collect();
-        self.add(
-            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            &mut c,
-            FWP_ACTION_PERMIT,
-            WEIGHT_PERMIT_LOCAL,
-        )?;
-        let mut c = [app_cond()];
-        self.add(
-            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            &mut c,
-            FWP_ACTION_BLOCK,
-            WEIGHT_BLOCK,
-        )
     }
 
     /// 加一条过滤器。同一字段的多个条件之间是「或」，不同字段之间是「与」。
@@ -216,10 +165,9 @@ impl FailClosedFilters {
         action: u32,
         weight: u8,
     ) -> Result<(), WfpError> {
-        let name = to_wide("ProcRoute fail-closed");
         // SAFETY: 全零的过滤器结构合法；下面填上需要的字段。
         let mut filter: FWPM_FILTER0 = unsafe { std::mem::zeroed() };
-        filter.displayData.name = name.as_ptr().cast_mut();
+        filter.displayData.name = self.name.as_ptr().cast_mut();
         filter.flags = FWPM_FILTER_FLAG_NONE;
         filter.layerKey = layer;
         filter.subLayerKey = SUBLAYER_KEY;
@@ -240,15 +188,180 @@ impl FailClosedFilters {
         // SAFETY: 引擎句柄有效；`filter` 及其指向的条件数组、条件里的地址与应用 ID 在调用期间都有效；
         // 不设安全描述符。
         check("FwpmFilterAdd0", unsafe {
-            FwpmFilterAdd0(self.engine, &filter, ptr::null_mut(), &mut id)
+            FwpmFilterAdd0(self.handle, &filter, ptr::null_mut(), &mut id)
         })
     }
 }
 
-impl Drop for FailClosedFilters {
+impl Drop for Engine {
     fn drop(&mut self) {
         // SAFETY: 引擎句柄由 FwpmEngineOpen0 返回，只在这里关闭一次；动态会话里的对象随之删除。
-        unsafe { FwpmEngineClose0(self.engine) };
+        unsafe { FwpmEngineClose0(self.handle) };
+    }
+}
+
+/// TUN 模式的 fail-closed 过滤器。丢弃（或进程退出）时全部消失。
+#[derive(Debug)]
+pub struct FailClosedFilters {
+    engine: Engine,
+    tun: TunRanges,
+}
+
+impl FailClosedFilters {
+    /// 打开动态会话并添加子层。需要管理员权限。
+    pub fn open(tun: TunRanges) -> Result<Self, WfpError> {
+        Ok(Self {
+            engine: Engine::open("ProcRoute fail-closed")?,
+            tun,
+        })
+    }
+
+    /// 为一个可执行文件装上 fail-closed 过滤器（IPv4 与 IPv6 各三条，一个事务内完成）。
+    pub fn protect(&mut self, exe: &Path) -> Result<(), WfpError> {
+        let app = AppId::from_path(exe)?;
+        self.engine.transaction(|| self.add_all(&app))
+    }
+
+    fn add_all(&self, app: &AppId) -> Result<(), WfpError> {
+        let (v4, v4_len) = self.tun.v4;
+        let (v6, v6_len) = self.tun.v6;
+        let mut tun4 = v4_mask(v4, v4_len);
+        let mut tun6 = v6_mask(v6, v6_len);
+        let mut local4 = local_scope_v4();
+        let mut local6 = local_scope_v6();
+        let app_cond = || app.condition();
+
+        // IPv4
+        let mut c = [app_cond(), local_v4(&mut tun4)];
+        self.engine.add(
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            &mut c,
+            FWP_ACTION_PERMIT,
+            WEIGHT_PERMIT_TUN,
+        )?;
+        let mut c: Vec<_> = std::iter::once(app_cond())
+            .chain(local4.iter_mut().map(remote_v4))
+            .collect();
+        self.engine.add(
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            &mut c,
+            FWP_ACTION_PERMIT,
+            WEIGHT_PERMIT_LOCAL,
+        )?;
+        let mut c = [app_cond()];
+        self.engine.add(
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            &mut c,
+            FWP_ACTION_BLOCK,
+            WEIGHT_BLOCK,
+        )?;
+
+        // IPv6
+        let mut c = [app_cond(), local_v6(&mut tun6)];
+        self.engine.add(
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            &mut c,
+            FWP_ACTION_PERMIT,
+            WEIGHT_PERMIT_TUN,
+        )?;
+        let mut c: Vec<_> = std::iter::once(app_cond())
+            .chain(local6.iter_mut().map(remote_v6))
+            .collect();
+        self.engine.add(
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            &mut c,
+            FWP_ACTION_PERMIT,
+            WEIGHT_PERMIT_LOCAL,
+        )?;
+        let mut c = [app_cond()];
+        self.engine.add(
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            &mut c,
+            FWP_ACTION_BLOCK,
+            WEIGHT_BLOCK,
+        )
+    }
+}
+
+/// 拦截层管不到的协议的过滤器，见模块文档。丢弃（或进程退出）时全部消失（C-NET-06）。
+#[derive(Debug)]
+pub struct ProtocolFilters {
+    engine: Engine,
+}
+
+impl ProtocolFilters {
+    /// 打开动态会话并添加子层。需要管理员权限。
+    pub fn open() -> Result<Self, WfpError> {
+        Ok(Self {
+            engine: Engine::open("ProcRoute protocol filters")?,
+        })
+    }
+
+    /// 挡住一个可执行文件 TCP、UDP 以外的协议（C-NET-07）。TCP 与 UDP 不受影响，由拦截层改道。
+    pub fn block_other_protocols(&mut self, exe: &Path) -> Result<(), WfpError> {
+        let app = AppId::from_path(exe)?;
+        let mut local4 = local_scope_v4();
+        let mut local6 = local_scope_v6();
+        let remotes4: Vec<_> = local4.iter_mut().map(remote_v4).collect();
+        let remotes6: Vec<_> = local6.iter_mut().map(remote_v6).collect();
+        self.engine.transaction(|| {
+            for (layer, remotes) in [
+                (FWPM_LAYER_ALE_AUTH_CONNECT_V4, &remotes4),
+                (FWPM_LAYER_ALE_AUTH_CONNECT_V6, &remotes6),
+            ] {
+                let mut c = [
+                    app.condition(),
+                    protocol_is(IPPROTO_TCP),
+                    protocol_is(IPPROTO_UDP),
+                ];
+                self.engine
+                    .add(layer, &mut c, FWP_ACTION_PERMIT, WEIGHT_PERMIT_TRANSPORT)?;
+                let mut c: Vec<_> = std::iter::once(app.condition())
+                    .chain(remotes.iter().copied())
+                    .collect();
+                self.engine
+                    .add(layer, &mut c, FWP_ACTION_PERMIT, WEIGHT_PERMIT_LOCAL)?;
+                let mut c = [app.condition()];
+                self.engine
+                    .add(layer, &mut c, FWP_ACTION_BLOCK, WEIGHT_BLOCK)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// 挡住所有进程发往外部的回显请求（docs/adr/0003）。
+    pub fn block_ping(&mut self) -> Result<(), WfpError> {
+        let mut local4 = local_scope_v4();
+        let mut local6 = local_scope_v6();
+        let remotes4: Vec<_> = local4.iter_mut().map(remote_v4).collect();
+        let remotes6: Vec<_> = local6.iter_mut().map(remote_v6).collect();
+        self.engine.transaction(|| {
+            for (layer, protocol, echo, remotes) in [
+                (
+                    FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+                    IPPROTO_ICMP,
+                    ICMP_ECHO_REQUEST,
+                    &remotes4,
+                ),
+                (
+                    FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+                    IPPROTO_ICMPV6,
+                    ICMPV6_ECHO_REQUEST,
+                    &remotes6,
+                ),
+            ] {
+                let mut c: Vec<_> = [protocol_is(protocol), icmp_type_is(echo)]
+                    .into_iter()
+                    .chain(remotes.iter().copied())
+                    .collect();
+                self.engine
+                    .add(layer, &mut c, FWP_ACTION_PERMIT, WEIGHT_PERMIT_LOCAL)?;
+                let mut c = [protocol_is(protocol), icmp_type_is(echo)];
+                self.engine
+                    .add(layer, &mut c, FWP_ACTION_BLOCK, WEIGHT_BLOCK)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -292,6 +405,24 @@ impl Drop for AppId {
     }
 }
 
+/// 回环、链路本地、组播与广播（与 TUN 配置里的永久直连一致，C-NET-05）。
+fn local_scope_v4() -> [FWP_V4_ADDR_AND_MASK; 4] {
+    [
+        v4_mask(Ipv4Addr::new(127, 0, 0, 0), 8),
+        v4_mask(Ipv4Addr::new(169, 254, 0, 0), 16),
+        v4_mask(Ipv4Addr::new(224, 0, 0, 0), 4),
+        v4_mask(Ipv4Addr::BROADCAST, 32),
+    ]
+}
+
+fn local_scope_v6() -> [FWP_V6_ADDR_AND_MASK; 3] {
+    [
+        v6_mask(Ipv6Addr::LOCALHOST, 128),
+        v6_mask(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+        v6_mask(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
+    ]
+}
+
 fn v4_mask(addr: Ipv4Addr, prefix: u8) -> FWP_V4_ADDR_AND_MASK {
     let mask = if prefix == 0 {
         0
@@ -312,7 +443,8 @@ fn v6_mask(addr: Ipv6Addr, prefix: u8) -> FWP_V6_ADDR_AND_MASK {
     }
 }
 
-fn addr_condition(field: GUID, kind: i32, value: FWP_CONDITION_VALUE0_0) -> FWPM_FILTER_CONDITION0 {
+/// 一个「等于」条件。
+fn condition(field: GUID, kind: i32, value: FWP_CONDITION_VALUE0_0) -> FWPM_FILTER_CONDITION0 {
     FWPM_FILTER_CONDITION0 {
         fieldKey: field,
         matchType: FWP_MATCH_EQUAL,
@@ -323,8 +455,26 @@ fn addr_condition(field: GUID, kind: i32, value: FWP_CONDITION_VALUE0_0) -> FWPM
     }
 }
 
+fn protocol_is(protocol: u8) -> FWPM_FILTER_CONDITION0 {
+    condition(
+        FWPM_CONDITION_IP_PROTOCOL,
+        FWP_UINT8,
+        FWP_CONDITION_VALUE0_0 { uint8: protocol },
+    )
+}
+
+/// ALE 层把 ICMP 类型放在本地端口字段（`FWPM_CONDITION_ICMP_TYPE` 就是它的别名），沙盒实测系统 ping 接口发的
+/// 回显请求这里是 8。
+fn icmp_type_is(icmp_type: u16) -> FWPM_FILTER_CONDITION0 {
+    condition(
+        FWPM_CONDITION_IP_LOCAL_PORT,
+        FWP_UINT16,
+        FWP_CONDITION_VALUE0_0 { uint16: icmp_type },
+    )
+}
+
 fn local_v4(m: &mut FWP_V4_ADDR_AND_MASK) -> FWPM_FILTER_CONDITION0 {
-    addr_condition(
+    condition(
         FWPM_CONDITION_IP_LOCAL_ADDRESS,
         FWP_V4_ADDR_MASK,
         FWP_CONDITION_VALUE0_0 { v4AddrMask: m },
@@ -332,7 +482,7 @@ fn local_v4(m: &mut FWP_V4_ADDR_AND_MASK) -> FWPM_FILTER_CONDITION0 {
 }
 
 fn remote_v4(m: &mut FWP_V4_ADDR_AND_MASK) -> FWPM_FILTER_CONDITION0 {
-    addr_condition(
+    condition(
         FWPM_CONDITION_IP_REMOTE_ADDRESS,
         FWP_V4_ADDR_MASK,
         FWP_CONDITION_VALUE0_0 { v4AddrMask: m },
@@ -340,7 +490,7 @@ fn remote_v4(m: &mut FWP_V4_ADDR_AND_MASK) -> FWPM_FILTER_CONDITION0 {
 }
 
 fn local_v6(m: &mut FWP_V6_ADDR_AND_MASK) -> FWPM_FILTER_CONDITION0 {
-    addr_condition(
+    condition(
         FWPM_CONDITION_IP_LOCAL_ADDRESS,
         FWP_V6_ADDR_MASK,
         FWP_CONDITION_VALUE0_0 { v6AddrMask: m },
@@ -348,7 +498,7 @@ fn local_v6(m: &mut FWP_V6_ADDR_AND_MASK) -> FWPM_FILTER_CONDITION0 {
 }
 
 fn remote_v6(m: &mut FWP_V6_ADDR_AND_MASK) -> FWPM_FILTER_CONDITION0 {
-    addr_condition(
+    condition(
         FWPM_CONDITION_IP_REMOTE_ADDRESS,
         FWP_V6_ADDR_MASK,
         FWP_CONDITION_VALUE0_0 { v6AddrMask: m },
