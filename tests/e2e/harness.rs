@@ -1,18 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! 精确进程模式的端到端测试（T-078）：真实的服务、sing-box 与 WinDivert，**只在测试虚拟机里、以管理员
-//! 身份运行**（C-TEST-04），经 `cargo xtask sandbox-test --only precise_e2e`。
+//! 端到端用例的测试框架：以控制台模式运行的真实服务、控制管道客户端、测试自己起的 SOCKS5 节点与回显目标进程。
 //!
-//! 沙盒上不了外网，所以「远端代理」是测试自己起的 SOCKS5 服务器：不管被要求连到哪里，都回一段写明
-//! 目标地址的 HTTP 响应。测试经控制管道导入指向它的 `socks5://` 节点、保存按 `curl.exe` 命中的精确模式
-//! 方案、启动会话，然后：
-//!
-//! - `curl` 访问一个文档用地址，必须经 拦截 → 回环中继 → sing-box → 节点 拿到桩的响应；
-//! - 本测试进程（非目标）访问同一地址不经过节点；
-//! - 停止会话后 `curl` 不再经过节点；
-//! - UDP（T-091）：`powershell.exe` 发往文档用地址的数据报经 UDP 中继 → sing-box → 节点的 UDP ASSOCIATE，
-//!   节点的回包注入回应用；
-//! - 子进程（F7）：方案只命中一个启动器（cmd.exe 的副本），它拉起后立即连接的 `curl` 同样经过节点。
-#![cfg(all(windows, feature = "vm-tests"))]
+//! 沙盒上不了外网，所以「远端代理」是测试自己起的 SOCKS5 服务器，不管被要求连到哪里都由它应答。
+//! 安装目录由 `cargo xtask sandbox-test` 准备（`PROCROUTE_INSTALL_DIR`：服务、sing-box、WinDivert）。
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -31,29 +21,52 @@ use procroute_proto::profile::{
 use serde_json::{Value, json};
 
 const PIPE: &str = r"\\.\pipe\ProcRoute.Control";
-/// 文档用地址（TEST-NET-1）：目标进程的连接在离开本机前就被改道。
-const TEST_NET: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
-const TARGET_PORT: u16 = 8080;
-const UDP_PORT: u16 = 5353;
+const SVC_LOG: &str = "svc-e2e.log";
+/// 文档用地址（TEST-NET-1）：目标进程的连接在离开本机前就被改道，发出去也没有人应答。
+pub const TEST_NET: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 
-fn curl_exe() -> String {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    format!(r"{root}\System32\curl.exe")
+/// 放着服务、sing-box 与锁定版本 WinDivert 的目录（`cargo xtask sandbox-test` 准备）。
+pub fn install_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("PROCROUTE_INSTALL_DIR").expect("PROCROUTE_INSTALL_DIR (sandbox-test)"),
+    )
+}
+
+fn out_dir() -> Option<PathBuf> {
+    std::env::var_os("PROCROUTE_OUT_DIR").map(PathBuf::from)
+}
+
+/// 把一段观察结果追加到输出目录的 `leak-report.log`。通过的用例不打印标准输出，这里留下实测的数字。
+pub fn record(scenario: &str, text: &str) {
+    let file = out_dir().and_then(|out| {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(out.join("leak-report.log"))
+            .ok()
+    });
+    if let Some(mut f) = file {
+        let _ = writeln!(f, "== {scenario}\n{text}");
+    }
 }
 
 /// 以控制台模式运行的服务，丢弃即结束（WinDivert 句柄随进程关闭，sing-box 随作业对象结束）。
-struct Service(Child);
+#[derive(Debug)]
+pub struct Service(Child);
 
 impl Service {
-    fn start() -> Self {
-        let dir = PathBuf::from(
-            std::env::var_os("PROCROUTE_INSTALL_DIR")
-                .expect("PROCROUTE_INSTALL_DIR (sandbox-test)"),
-        );
-        let log: Stdio = std::env::var_os("PROCROUTE_OUT_DIR")
-            .and_then(|out| File::create(PathBuf::from(out).join("svc-e2e.log")).ok())
+    pub fn start() -> Self {
+        // 追加写：一次运行里的各个用例都留下日志，失败时能对照
+        let log: Stdio = out_dir()
+            .and_then(|out| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(out.join(SVC_LOG))
+                    .ok()
+            })
             .map_or_else(Stdio::null, Stdio::from);
-        let child = Command::new(dir.join("procroute-svc.exe"))
+        let child = Command::new(install_dir().join("procroute-svc.exe"))
             .arg("--console")
             .env("NO_COLOR", "1")
             .stdout(Stdio::null())
@@ -61,6 +74,13 @@ impl Service {
             .spawn()
             .expect("start procroute-svc --console");
         Self(child)
+    }
+
+    /// 最近一次会话停止时拦截层记下的 `attribution_miss`（C-TEST-02）。调用前先停止会话。
+    pub fn attribution_miss(&self) -> u64 {
+        let out = out_dir().expect("PROCROUTE_OUT_DIR (sandbox-test)");
+        let log = std::fs::read_to_string(out.join(SVC_LOG)).expect("read the service log");
+        attribution_miss_in(&log).expect("the service logged its interception counters")
     }
 }
 
@@ -71,15 +91,23 @@ impl Drop for Service {
     }
 }
 
+/// 日志里最后一个 `attribution_miss=<数字>`。
+fn attribution_miss_in(log: &str) -> Option<u64> {
+    let (_, tail) = log.rsplit_once("attribution_miss=")?;
+    let digits = tail.split(|c: char| !c.is_ascii_digit()).next()?;
+    digits.parse().ok()
+}
+
 /// 控制管道客户端：一行一条 JSON-RPC 消息，跳过服务推送的通知。
-struct Client {
+#[derive(Debug)]
+pub struct Client {
     writer: File,
     reader: BufReader<File>,
     next_id: u64,
 }
 
 impl Client {
-    fn connect() -> Self {
+    pub fn connect() -> Self {
         let deadline = Instant::now() + Duration::from_secs(30);
         let pipe = loop {
             match OpenOptions::new().read(true).write(true).open(PIPE) {
@@ -107,7 +135,7 @@ impl Client {
     }
 
     /// 调用一个方法；出错时返回错误对象。
-    fn try_call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
+    pub fn try_call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
         self.next_id += 1;
         let id = self.next_id;
         let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -127,23 +155,39 @@ impl Client {
         }
     }
 
-    fn call(&mut self, method: &str, params: Value) -> Value {
+    pub fn call(&mut self, method: &str, params: Value) -> Value {
         let r = self.try_call(method, params);
         assert!(r.is_ok(), "{method} failed: {:?}", r.as_ref().err());
         r.unwrap_or_default()
     }
+
+    /// 停止会话并确认已经停下。
+    pub fn stop_session(&mut self) {
+        let stopped = self.call("session.stop", json!({}));
+        assert_eq!(stopped["state"], "stopped", "{stopped}");
+    }
 }
 
-/// 「远端代理」：无认证的 SOCKS5，接受任何 CONNECT，回一段写明目标的 HTTP 响应。记下每个目标。
-struct Node {
-    addr: SocketAddr,
+/// 节点怎么应答。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    /// TCP 回一段写明目标的 HTTP 响应（给 curl），UDP 回 `pong udp <目标>`。
+    Describe,
+    /// TCP 与 UDP 都原样回显（给 echo_target）。
+    Echo,
+}
+
+/// 「远端代理」：无认证的 SOCKS5，接受任何 CONNECT 与 UDP ASSOCIATE。记下每个目标。
+#[derive(Debug)]
+pub struct Node {
+    pub addr: SocketAddr,
     targets: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Node {
-    fn start() -> Self {
+    pub fn start(reply: Reply) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind the node");
         listener.set_nonblocking(true).expect("nonblocking");
         let addr = listener.local_addr().expect("node address");
@@ -158,7 +202,7 @@ impl Node {
                         Ok((s, _)) => {
                             let targets = Arc::clone(&targets);
                             std::thread::spawn(move || {
-                                let _ = serve_socks(s, &targets);
+                                let _ = serve_socks(s, &targets, reply);
                             });
                         }
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -177,7 +221,8 @@ impl Node {
         }
     }
 
-    fn targets(&self) -> Vec<String> {
+    /// 节点见过的目标：TCP 是 `地址:端口`，UDP 是 `udp 地址:端口`。
+    pub fn targets(&self) -> Vec<String> {
         self.targets.lock().expect("targets").clone()
     }
 }
@@ -191,7 +236,11 @@ impl Drop for Node {
     }
 }
 
-fn serve_socks(mut s: TcpStream, targets: &Mutex<Vec<String>>) -> std::io::Result<()> {
+fn serve_socks(
+    mut s: TcpStream,
+    targets: &Mutex<Vec<String>>,
+    reply: Reply,
+) -> std::io::Result<()> {
     s.set_nonblocking(false)?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
     // 问候：版本 5，方法列表；选「无需认证」
@@ -209,11 +258,18 @@ fn serve_socks(mut s: TcpStream, targets: &Mutex<Vec<String>>) -> std::io::Resul
     let mut port = [0u8; 2];
     s.read_exact(&mut port)?;
     if req[1] == 3 {
-        return serve_udp_associate(s, targets);
+        return serve_udp_associate(s, targets, reply);
     }
     let target = format!("{host}:{}", u16::from_be_bytes(port));
     targets.lock().expect("targets").push(target.clone());
     s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])?;
+    match reply {
+        Reply::Describe => describe_over_http(s, &target),
+        Reply::Echo => echo_until_closed(s),
+    }
+}
+
+fn describe_over_http(mut s: TcpStream, target: &str) -> std::io::Result<()> {
     // 读完 HTTP 请求头再回响应
     let mut reader = BufReader::new(s.try_clone()?);
     loop {
@@ -227,8 +283,18 @@ fn serve_socks(mut s: TcpStream, targets: &Mutex<Vec<String>>) -> std::io::Resul
         s,
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
-    )?;
-    Ok(())
+    )
+}
+
+fn echo_until_closed(mut s: TcpStream) -> std::io::Result<()> {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = s.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        s.write_all(&buf[..n])?;
+    }
 }
 
 /// SOCKS5 地址（ATYP 之后的部分，不含端口）。
@@ -255,16 +321,20 @@ fn read_host(r: &mut impl Read, atyp: u8) -> std::io::Result<Option<String>> {
     }))
 }
 
-/// UDP ASSOCIATE：在回环上开一个 UDP 端口，收到的每个数据报回一个 `pong udp <目标>`，「来自」那个目标。
+/// UDP ASSOCIATE：在回环上开一个 UDP 端口，收到的每个数据报回一个，「来自」它要去的那个目标。
 /// 控制连接关闭即结束。
-fn serve_udp_associate(control: TcpStream, targets: &Mutex<Vec<String>>) -> std::io::Result<()> {
+fn serve_udp_associate(
+    control: TcpStream,
+    targets: &Mutex<Vec<String>>,
+    reply: Reply,
+) -> std::io::Result<()> {
     let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
     udp.set_read_timeout(Some(Duration::from_millis(200)))?;
     let port = udp.local_addr()?.port().to_be_bytes();
     let mut control = control;
     control.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, port[0], port[1]])?;
     control.set_nonblocking(true)?;
-    let mut buf = [0u8; 2048];
+    let mut buf = vec![0u8; 65_535];
     loop {
         // 控制连接被对方关闭：关联结束
         match control.peek(&mut [0u8; 1]) {
@@ -294,47 +364,17 @@ fn serve_udp_associate(control: TcpStream, targets: &Mutex<Vec<String>>) -> std:
             .push(format!("udp {target}"));
         // 回包的头与请求相同：地址字段就是回包的来源（那个目标）
         let header_len = n - r.len();
-        let mut reply = buf[..header_len].to_vec();
-        reply.extend_from_slice(format!("pong udp {target}").as_bytes());
-        udp.send_to(&reply, from)?;
+        let mut answer = buf[..header_len].to_vec();
+        match reply {
+            Reply::Describe => answer.extend_from_slice(format!("pong udp {target}").as_bytes()),
+            Reply::Echo => answer.extend_from_slice(r),
+        }
+        udp.send_to(&answer, from)?;
     }
 }
 
-/// 用 curl 访问文档用地址，返回响应体（失败时为空）。
-fn curl() -> String {
-    let out = Command::new(curl_exe())
-        .args([
-            "-s",
-            "-m",
-            "10",
-            &format!("http://{TEST_NET}:{TARGET_PORT}/hello"),
-        ])
-        .output()
-        .expect("run curl.exe");
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn powershell_exe() -> String {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe")
-}
-
-/// 用 PowerShell 发一个 UDP 数据报到文档用地址并等回包，返回回包内容（超时为空）。
-fn powershell_udp() -> String {
-    let script = format!(
-        "$u = New-Object System.Net.Sockets.UdpClient; $u.Client.ReceiveTimeout = 10000; \
-         $b = [Text.Encoding]::ASCII.GetBytes('ping'); [void]$u.Send($b, $b.Length, '{TEST_NET}', {UDP_PORT}); \
-         $ep = New-Object System.Net.IPEndPoint([Net.IPAddress]::Any, 0); \
-         try {{ $r = $u.Receive([ref]$ep); [Text.Encoding]::ASCII.GetString($r) + ' from ' + $ep }} catch {{ 'timeout' }}"
-    );
-    let out = Command::new(powershell_exe())
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .expect("run powershell.exe");
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
-fn profile(node_id: &str, exe: &str) -> Profile {
+/// 按 `exe` 的完整路径命中的精确模式方案，`fail_policy` 取默认的 `block`，包含子进程。
+pub fn profile(node_id: &str, exe: &str) -> Profile {
     Profile {
         schema_version: PROFILE_SCHEMA_VERSION,
         id: "e2e-precise".into(),
@@ -358,7 +398,7 @@ fn profile(node_id: &str, exe: &str) -> Profile {
 }
 
 /// 起服务、导入指向 `node` 的节点、保存按 `exe` 命中的方案并启动会话。
-fn start_session(node: &Node, exe: &str) -> (Service, Client) {
+pub fn start_session(node: &Node, exe: &str) -> (Service, Client) {
     let service = Service::start();
     let mut c = Client::connect();
     c.call(
@@ -380,7 +420,7 @@ fn start_session(node: &Node, exe: &str) -> (Service, Client) {
     let started = c.try_call("session.start", json!({ "profile_id": p.id }));
     assert!(
         started.is_ok(),
-        "session.start failed: {:?} (see svc-e2e.log)",
+        "session.start failed: {:?} (see {SVC_LOG})",
         started.as_ref().err()
     );
     let status = started.unwrap_or_default();
@@ -389,99 +429,104 @@ fn start_session(node: &Node, exe: &str) -> (Service, Client) {
     (service, c)
 }
 
-#[test]
-fn a_target_process_reaches_the_node_through_the_whole_path() {
-    let node = Node::start();
-    let (_service, mut c) = start_session(&node, &curl_exe());
-
-    // 目标进程：经整条链路到达节点
-    let target = format!("{TEST_NET}:{TARGET_PORT}");
-    let body = curl();
-    assert_eq!(
-        body,
-        format!("procroute-e2e {target}"),
-        "curl through the session"
-    );
-    assert_eq!(node.targets(), vec![target.clone()]);
-
-    // 非目标进程（本测试进程）：不经过节点
-    let _ = TcpStream::connect_timeout(
-        &SocketAddr::from((TEST_NET, TARGET_PORT)),
-        Duration::from_secs(2),
-    );
-    assert_eq!(node.targets().len(), 1, "{:?}", node.targets());
-
-    // 停止会话：撤下拦截，curl 不再经过节点
-    let stopped = c.call("session.stop", json!({}));
-    assert_eq!(stopped["state"], "stopped");
-    let after = curl();
-    assert!(!after.starts_with("procroute-e2e"), "{after}");
-    assert_eq!(node.targets().len(), 1, "{:?}", node.targets());
-}
-
-#[test]
-fn target_udp_reaches_the_node_and_the_reply_comes_back() {
-    let node = Node::start();
-    let (_service, mut c) = start_session(&node, &powershell_exe());
-
-    // 目标进程的 UDP：拦截 → UDP 中继 → sing-box → 节点的 UDP ASSOCIATE，回包注入回应用
-    let target = format!("{TEST_NET}:{UDP_PORT}");
-    let reply = powershell_udp();
-    assert!(
-        reply.starts_with(&format!("pong udp {target} from {target}")),
-        "reply seen by the app: {reply:?}; node saw {:?}",
-        node.targets()
-    );
-    assert!(node.targets().contains(&format!("udp {target}")));
-
-    let stopped = c.call("session.stop", json!({}));
-    assert_eq!(stopped["state"], "stopped");
-    // 停止之后不再经过节点
-    let before = node.targets().len();
-    let after = powershell_udp();
-    assert!(!after.starts_with("pong"), "{after}");
-    assert_eq!(
-        node.targets()
-            .iter()
-            .filter(|t| t.starts_with("udp "))
-            .count(),
-        node.targets()[..before]
-            .iter()
-            .filter(|t| t.starts_with("udp "))
-            .count()
-    );
-}
-
 /// 「启动器」：复制一份 cmd.exe。测试程序本身经 run.ps1 的 `cmd.exe /c` 启动，是系统 cmd.exe 的后代，
 /// 方案若命中系统 cmd.exe，测试进程也会继承成目标；换个路径的副本就只有它拉起的进程是后代。
-fn launcher_exe() -> PathBuf {
+pub fn launcher_exe() -> PathBuf {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let launcher = std::env::temp_dir().join("procroute-e2e-launcher.exe");
     std::fs::copy(format!(r"{root}\System32\cmd.exe"), &launcher).expect("copy cmd.exe");
     launcher
 }
 
-#[test]
-fn a_child_connecting_right_after_start_inherits_the_target() {
-    // F7：方案只命中启动器；它拉起的 curl 一启动就连接，进程追踪（ETW）还没报到，靠当场的继承判定
-    let node = Node::start();
-    let launcher = launcher_exe();
-    let (_service, mut c) = start_session(&node, &launcher.to_string_lossy());
-    let url = format!("http://{TEST_NET}:{TARGET_PORT}/child");
-    let out = Command::new(&launcher)
-        .args(["/c", &curl_exe(), "-s", "-m", "10", &url])
-        .output()
-        .expect("run the launcher");
-    let body = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert_eq!(
-        body,
-        format!("procroute-e2e {TEST_NET}:{TARGET_PORT}"),
-        "the child went through the node"
-    );
-    // 测试进程直接运行的 curl 不是启动器的后代：不经过节点
-    let direct = curl();
-    assert!(!direct.starts_with("procroute-e2e"), "{direct}");
-    assert_eq!(node.targets().len(), 1, "{:?}", node.targets());
-    let stopped = c.call("session.stop", json!({}));
-    assert_eq!(stopped["state"], "stopped");
+/// 回显目标进程，由 `cargo xtask sandbox-test` 放在测试程序旁边。
+pub fn echo_target_exe() -> PathBuf {
+    std::env::current_exe()
+        .expect("test executable")
+        .with_file_name("echo_target.exe")
+}
+
+/// 回显目标进程的一次运行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EchoRun {
+    /// `echo_target` 自己报告的进程号。
+    pub pid: u32,
+    /// 全部轮次都收到了正确的回显。
+    pub ok: bool,
+    pub output: String,
+}
+
+/// 一次回显：协议、远端、轮数、每轮字节数与超时。
+#[derive(Debug, Clone, Copy)]
+pub struct Echo {
+    pub protocol: &'static str,
+    pub remote: SocketAddr,
+    pub rounds: u32,
+    pub bytes: usize,
+    pub timeout: Duration,
+}
+
+impl Echo {
+    fn args(&self) -> Vec<String> {
+        vec![
+            self.protocol.to_owned(),
+            self.remote.to_string(),
+            self.rounds.to_string(),
+            self.bytes.to_string(),
+            self.timeout.as_millis().to_string(),
+        ]
+    }
+
+    /// 直接启动，不等它结束。
+    pub fn spawn(&self) -> Child {
+        Command::new(echo_target_exe())
+            .args(self.args())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start echo_target")
+    }
+
+    /// 经启动器（cmd.exe 的副本）拉起，不等它结束。
+    pub fn spawn_via(&self, launcher: &std::path::Path) -> Child {
+        Command::new(launcher)
+            .arg("/c")
+            .arg(echo_target_exe())
+            .args(self.args())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start the launcher")
+    }
+
+    pub fn run(&self) -> EchoRun {
+        finish_echo(self.spawn())
+    }
+}
+
+/// 等一次回显结束，读出结果。
+pub fn finish_echo(child: Child) -> EchoRun {
+    let out = child.wait_with_output().expect("wait for echo_target");
+    let output = String::from_utf8_lossy(&out.stdout).into_owned();
+    let pid = output
+        .lines()
+        .find_map(|l| l.strip_prefix("pid="))
+        .and_then(|p| p.trim().parse().ok())
+        .expect("echo_target reports its pid on the first line");
+    EchoRun {
+        pid,
+        ok: out.status.success() && output.lines().any(|l| l.trim() == "ok"),
+        output,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_last_attribution_miss_in_the_log_wins() {
+        let log = "a attribution_miss=7 b\nc attribution_miss=12\nd";
+        assert_eq!(attribution_miss_in(log), Some(12));
+        assert_eq!(attribution_miss_in("no counters here"), None);
+    }
 }
